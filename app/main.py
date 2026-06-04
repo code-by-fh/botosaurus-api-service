@@ -42,17 +42,19 @@ def render_url(req: RenderRequest):
         _pool.release(driver)
 
 
-_VNC_PAGE = """<!DOCTYPE html>
+def _vnc_page() -> str:
+    vnc_port = os.environ.get("VNC_PORT", "6080")
+    return f"""<!DOCTYPE html>
 <html>
 <head>
   <title>Browser View — noVNC</title>
   <style>
-    body, html { margin: 0; padding: 0; height: 100%; background: #1a1a1a; }
-    iframe { width: 100%; height: 100%; border: none; display: block; }
+    body, html {{ margin: 0; padding: 0; height: 100%; background: #1a1a1a; }}
+    iframe {{ width: 100%; height: 100%; border: none; display: block; }}
   </style>
 </head>
 <body>
-  <iframe src="http://localhost:6080/vnc.html?autoconnect=true&resize=scale"></iframe>
+  <iframe src="http://localhost:{vnc_port}/vnc.html?autoconnect=true&resize=scale"></iframe>
 </body>
 </html>"""
 
@@ -68,4 +70,4 @@ def health():
 
 @app.get("/vnc")
 def vnc():
-    return Response(content=_VNC_PAGE, media_type="text/html")
+    return Response(content=_vnc_page(), media_type="text/html")

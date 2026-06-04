@@ -79,10 +79,11 @@ def test_health_returns_pool_status(client, mock_pool):
     assert body["workers_total"] == 3
 
 
-def test_vnc_returns_html_with_iframe(client):
+def test_vnc_returns_html_with_iframe(client, monkeypatch):
+    monkeypatch.setenv("VNC_PORT", "6081")
     c, _ = client
     resp = c.get("/vnc")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert "iframe" in resp.text
-    assert "6080" in resp.text
+    assert "6081" in resp.text

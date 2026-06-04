@@ -7,5 +7,6 @@ services:
     environment:
       MAX_WORKERS: "3"
       DISPLAY: ":99"
+      VNC_PORT: "6081"
     restart: unless-stopped
     shm_size: "2gb"
