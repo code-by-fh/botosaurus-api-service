@@ -1,6 +1,30 @@
 import queue
 import threading
+
+import botasaurus_driver.core.config as _bota_config
 from botasaurus_driver import Driver
+
+
+def _use_shared_display() -> None:
+    """Make all botasaurus browsers render on the shared Xvfb display (:99).
+
+    In a Docker/VM environment botasaurus auto-spawns a *separate* PyVirtualDisplay
+    (Xvfb) per browser so that headed Chrome has a display to render on. That is a
+    sensible default, but it puts every worker on its own isolated display that our
+    x11vnc/noVNC server (bound to :99) cannot see.
+
+    We already provide a real, working Xvfb on :99 (started in entrypoint.sh) with
+    x11vnc attached, which fulfils the exact same need. By clearing botasaurus'
+    ``is_vmish`` flag we skip its per-browser display creation, so Chrome inherits
+    our ``DISPLAY=:99`` from the environment and becomes observable via noVNC.
+
+    Only ``is_vmish`` is touched. ``is_docker`` is left intact, so botasaurus still
+    forces ``--no-sandbox`` and runs its zombie-process cleanup in Docker.
+    """
+    _bota_config.is_vmish = False
+
+
+_use_shared_display()
 
 
 class BrowserPool:
