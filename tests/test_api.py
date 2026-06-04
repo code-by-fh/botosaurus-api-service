@@ -1,9 +1,24 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
-from app.main import app
+from app.main import app, _env_bool
 import app.main as main_module
 from app.renderer import NavigationError, RenderTimeoutError
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("true", True), ("True", True), ("1", True), ("yes", True), ("on", True),
+    ("false", False), ("0", False), ("no", False), ("", False),
+])
+def test_env_bool_parses_truthy_values(value, expected, monkeypatch):
+    monkeypatch.setenv("HEADLESS", value)
+    assert _env_bool("HEADLESS", False) is expected
+
+
+def test_env_bool_returns_default_when_unset(monkeypatch):
+    monkeypatch.delenv("HEADLESS", raising=False)
+    assert _env_bool("HEADLESS", False) is False
+    assert _env_bool("HEADLESS", True) is True
 
 
 @pytest.fixture

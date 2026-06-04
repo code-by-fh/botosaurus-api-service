@@ -9,10 +9,20 @@ from app.renderer import render, NavigationError, RenderTimeoutError
 _pool: BrowserPool | None = None
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
-    _pool = BrowserPool(size=int(os.environ.get("MAX_WORKERS", "3")))
+    _pool = BrowserPool(
+        size=int(os.environ.get("MAX_WORKERS", "3")),
+        headless=_env_bool("HEADLESS", False),
+    )
     yield
     _pool.shutdown()
 

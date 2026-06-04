@@ -24,17 +24,20 @@ def _use_shared_display() -> None:
     _bota_config.is_vmish = False
 
 
-_use_shared_display()
-
-
 class BrowserPool:
-    def __init__(self, size: int):
+    def __init__(self, size: int, headless: bool = False):
         self._size = size
+        self._headless = headless
+        # In headed mode, route all browsers to the shared :99 display so they are
+        # observable via noVNC. In headless mode botasaurus uses ``--headless=new``
+        # and never creates a virtual display, so no routing is needed.
+        if not headless:
+            _use_shared_display()
         self._queue: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
         self._busy = 0
         for _ in range(size):
-            self._queue.put(Driver(headless=False))
+            self._queue.put(Driver(headless=headless))
 
     @property
     def total(self) -> int:
