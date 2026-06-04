@@ -1,9 +1,3 @@
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import TimeoutException, WebDriverException
-
-
 class NavigationError(Exception):
     pass
 
@@ -14,23 +8,16 @@ class RenderTimeoutError(Exception):
 
 def render(driver, url: str, wait_for: str | None = None, timeout: int = 30) -> str:
     try:
-        driver.get(url)
-    except WebDriverException as exc:
+        driver.get(url, timeout=timeout)
+    except Exception as exc:
         raise NavigationError(str(exc)) from exc
 
-    try:
-        if wait_for:
-            WebDriverWait(driver, timeout).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, wait_for))
-            )
-        else:
-            WebDriverWait(driver, timeout).until(
-                lambda d: d.execute_script("return document.readyState") == "complete"
-            )
-    except TimeoutException as exc:
-        target = wait_for or "readyState==complete"
-        raise RenderTimeoutError(
-            f"Timed out after {timeout}s waiting for '{target}'"
-        ) from exc
+    if wait_for:
+        try:
+            driver.wait_for_element(wait_for, wait=timeout)
+        except Exception as exc:
+            raise RenderTimeoutError(
+                f"Timed out after {timeout}s waiting for '{wait_for}'"
+            ) from exc
 
-    return driver.page_source
+    return driver.page_html

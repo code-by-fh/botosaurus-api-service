@@ -11,7 +11,7 @@ x11vnc -display :99 -forever -nopw -quiet -rfbport 5900 &
 sleep 0.5
 
 echo "[entrypoint] Starting noVNC websockify on :6080"
-/opt/novnc/utils/websockify --web /opt/novnc 6080 localhost:5900 &
+websockify --web /opt/novnc 6080 localhost:5900 &
 sleep 0.5
 
 echo "[entrypoint] Starting FastAPI on :8000"

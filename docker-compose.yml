@@ -3,7 +3,7 @@ services:
     build: .
     ports:
       - "8000:8000"
-      - "6080:6080"
+      - "6081:6080"
     environment:
       MAX_WORKERS: "3"
       DISPLAY: ":99"
