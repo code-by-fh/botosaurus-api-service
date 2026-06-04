@@ -1,6 +1,13 @@
 from unittest.mock import MagicMock, patch
 import pytest
+import botasaurus_driver.core.config as _bota_config
 from app.browser_pool import BrowserPool
+
+
+def test_importing_browser_pool_routes_browsers_to_shared_display():
+    # Importing the module must clear is_vmish so botasaurus renders on our
+    # shared :99 display instead of spawning a per-browser virtual display.
+    assert _bota_config.is_vmish is False
 
 
 def _make_pool(size=2):
