@@ -1,0 +1,11 @@
+services:
+  botosaurus-api:
+    build: .
+    ports:
+      - "8000:8000"
+      - "6080:6080"
+    environment:
+      MAX_WORKERS: "3"
+      DISPLAY: ":99"
+    restart: unless-stopped
+    shm_size: "2gb"
