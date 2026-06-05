@@ -12,6 +12,6 @@ services:
       #   and are observable live via noVNC.
       # HEADLESS=true: Chrome runs in real headless mode (no visible window,
       #   lower resource use); the noVNC view stays empty.
-      HEADLESS: "false"
+      HEADLESS: "true"
     restart: unless-stopped
     shm_size: "2gb"
