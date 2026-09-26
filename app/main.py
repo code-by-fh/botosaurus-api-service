@@ -105,7 +105,15 @@ def render_url(req: RenderRequest):
 
 
 def _vnc_page(host: str = "localhost", scheme: str = "http") -> str:
-    vnc_port = os.environ.get("VNC_PORT", "6080")
+    prefix = os.environ.get("NOVNC_PREFIX", "").strip()
+    if prefix:
+        clean_prefix = "/" + prefix.strip("/")
+        ws_path = clean_prefix.lstrip("/") + "/websockify"
+        src = f"{clean_prefix}/vnc.html?autoconnect=true&resize=scale&path={ws_path}"
+    else:
+        vnc_port = os.environ.get("VNC_PORT", "6080")
+        src = f"{scheme}://{host}:{vnc_port}/vnc.html?autoconnect=true&resize=scale&path=websockify"
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -116,7 +124,7 @@ def _vnc_page(host: str = "localhost", scheme: str = "http") -> str:
   </style>
 </head>
 <body>
-  <iframe src="{scheme}://{host}:{vnc_port}/vnc.html?autoconnect=true&resize=scale&path=websockify"></iframe>
+  <iframe src="{src}"></iframe>
 </body>
 </html>"""
 

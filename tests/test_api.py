@@ -239,6 +239,14 @@ def test_vnc_uses_https_scheme_when_forwarded_proto_set(client, monkeypatch):
     assert 'src="https://testserver:6081' in resp.text
 
 
+def test_vnc_uses_prefix_when_novnc_prefix_set(client, monkeypatch):
+    monkeypatch.setenv("NOVNC_PREFIX", "/novnc")
+    c, _ = client
+    resp = c.get("/vnc", auth=("admin", TEST_API_KEY))
+    assert resp.status_code == 200
+    assert 'src="/novnc/vnc.html?autoconnect=true&resize=scale&path=novnc/websockify"' in resp.text
+
+
 def test_vnc_requires_auth(client):
     c, _ = client
     resp = c.get("/vnc")
