@@ -1,8 +1,9 @@
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Response
 from pydantic import BaseModel, HttpUrl
 
+from app.auth import verify_api_key, verify_basic_auth
 from app.browser_pool import BrowserPool
 from app.renderer import render, NavigationError, RenderTimeoutError
 
@@ -36,7 +37,7 @@ class RenderRequest(BaseModel):
     timeout: int = 30
 
 
-@app.post("/render")
+@app.post("/render", dependencies=[Depends(verify_api_key)])
 def render_url(req: RenderRequest):
     driver = _pool.acquire()
     if driver is None:
@@ -71,6 +72,11 @@ def _vnc_page() -> str:
 
 @app.get("/health")
 def health():
+    return {"status": "ok"}
+
+
+@app.get("/health/detail", dependencies=[Depends(verify_api_key)])
+def health_detail():
     return {
         "status": "ok",
         "workers_busy": _pool.busy,
@@ -78,6 +84,6 @@ def health():
     }
 
 
-@app.get("/vnc")
+@app.get("/vnc", dependencies=[Depends(verify_basic_auth)])
 def vnc():
     return Response(content=_vnc_page(), media_type="text/html")

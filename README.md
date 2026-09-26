@@ -24,9 +24,47 @@ services:
     ports:
       - "8000:8000"   # Render API
       - "6080:6080"   # NoVNC debug view
+    env_file:
+      - .env          # Must contain API_KEY=<your-key>
     environment:
       MAX_WORKERS: 3
 ```
+
+## Authentication
+
+All endpoints except `/health` require a valid API key.
+
+### Setup
+
+1. Generate a strong random key:
+   ```bash
+   python -c "import secrets; print(secrets.token_urlsafe(48))"
+   ```
+
+2. Create a `.env` file (see `.env.example`):
+   ```
+   API_KEY=<your-generated-key>
+   ```
+
+3. The `.env` file is already in `.gitignore` — **never commit your key**.
+
+### API Endpoints (`/render`) — Bearer Token
+
+Programmatic endpoints use the `Authorization: Bearer <key>` header:
+
+```bash
+curl -X POST http://localhost:8000/render \
+  -H "Authorization: Bearer <your-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
+```
+
+### Browser Endpoints (`/vnc`) — HTTP Basic Auth
+
+The `/vnc` debug view uses HTTP Basic Auth so your browser shows a native login dialog. Enter any username and the API key as password.
+
+**Without valid credentials you'll receive `401 Unauthorized`.**
+
 
 ## API
 
@@ -68,29 +106,41 @@ Error body: `{ "error": "<key>", "detail": "<message>" }`
 ```python
 import requests
 
-response = requests.post("http://localhost:8000/render", json={
-    "url": "https://example.com",
-    "wait_for": "#main-content",
-})
+response = requests.post("http://localhost:8000/render",
+    headers={"Authorization": "Bearer <your-key>"},
+    json={
+        "url": "https://example.com",
+        "wait_for": "#main-content",
+    },
+)
 html = response.text
 ```
 
 ### `GET /health`
 
-Returns worker pool status.
+Public liveness probe — no authentication required.
+
+```json
+{ "status": "ok" }
+```
+
+### `GET /health/detail` 🔒
+
+Detailed worker pool status. Requires Bearer token.
 
 ```json
 { "status": "ok", "workers_busy": 1, "workers_total": 3 }
 ```
 
-### `GET /vnc`
+### `GET /vnc` 🔒
 
-Returns an HTML page with an embedded NoVNC view — watch the browser live at `http://localhost:6080/vnc.html`.
+Returns an HTML page with an embedded NoVNC view. Protected by HTTP Basic Auth (password = API key).
 
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
+| `API_KEY` | — (**required**) | Bearer token for API authentication |
 | `MAX_WORKERS` | `3` | Number of parallel browser instances |
 | `HEADLESS` | `true` | Set to `false` to enable headed mode with NoVNC |
 

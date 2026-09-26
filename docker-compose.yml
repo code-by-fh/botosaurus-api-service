@@ -4,6 +4,8 @@ services:
     ports:
       - "8000:8000"
       - "6081:6080"
+    env_file:
+      - .env
     environment:
       MAX_WORKERS: "3"
       DISPLAY: ":99"
@@ -13,5 +15,7 @@ services:
       # HEADLESS=true: Chrome runs in real headless mode (no visible window,
       #   lower resource use); the noVNC view stays empty.
       HEADLESS: "true"
+      # API_KEY is loaded from .env file (see env_file above).
+      # Generate a strong random key: python -c "import secrets; print(secrets.token_urlsafe(48))"
     restart: unless-stopped
     shm_size: "2gb"
