@@ -1,11 +1,19 @@
+import logging
 import os
+import time
 from contextlib import asynccontextmanager
+from typing import Literal
+
 from fastapi import Depends, FastAPI, HTTPException, Response
+from markdownify import markdownify
 from pydantic import BaseModel, HttpUrl
 
+import app.logging_config  # noqa: F401 — triggers logging setup on import
 from app.auth import verify_api_key, verify_basic_auth
 from app.browser_pool import BrowserPool
 from app.renderer import render, NavigationError, RenderTimeoutError
+
+log = logging.getLogger("botosaurus.api")
 
 _pool: BrowserPool | None = None
 
@@ -20,11 +28,13 @@ def _env_bool(name: str, default: bool) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
+    log.info("Starting up botosaurus-api-service")
     _pool = BrowserPool(
         size=int(os.environ.get("MAX_WORKERS", "3")),
         headless=_env_bool("HEADLESS", False),
     )
     yield
+    log.info("Shutting down botosaurus-api-service")
     _pool.shutdown()
 
 
@@ -35,19 +45,34 @@ class RenderRequest(BaseModel):
     url: HttpUrl
     wait_for: str | None = None
     timeout: int = 30
+    format: Literal["html", "markdown"] = "html"
 
 
 @app.post("/render", dependencies=[Depends(verify_api_key)])
 def render_url(req: RenderRequest):
+    log.debug(
+        "POST /render url=%s format=%s wait_for=%s timeout=%d",
+        req.url, req.format, req.wait_for, req.timeout,
+    )
     driver = _pool.acquire()
     if driver is None:
         raise HTTPException(status_code=503, detail={"error": "pool_exhausted"})
+    t0 = time.monotonic()
     try:
         html = render(driver, str(req.url), req.wait_for, req.timeout)
+        if req.format == "markdown":
+            md = markdownify(html, heading_style="ATX", strip=["img", "script", "style"])
+            elapsed = time.monotonic() - t0
+            log.info("Rendered %s as markdown in %.2fs", req.url, elapsed)
+            return Response(content=md, media_type="text/markdown; charset=utf-8")
+        elapsed = time.monotonic() - t0
+        log.info("Rendered %s as html in %.2fs", req.url, elapsed)
         return Response(content=html, media_type="text/html")
     except NavigationError as exc:
+        log.error("Navigation failed for %s: %s", req.url, exc)
         raise HTTPException(status_code=502, detail={"error": "navigation_failed", "detail": str(exc)})
     except RenderTimeoutError as exc:
+        log.error("Render timeout for %s: %s", req.url, exc)
         raise HTTPException(status_code=504, detail={"error": "timeout", "detail": str(exc)})
     finally:
         _pool.release(driver)
@@ -65,7 +90,7 @@ def _vnc_page() -> str:
   </style>
 </head>
 <body>
-  <iframe src="http://localhost:{vnc_port}/vnc.html?autoconnect=true&resize=scale"></iframe>
+  <iframe src="http://localhost:{vnc_port}/vnc.html?autoconnect=true&resize=scale&path=websockify"></iframe>
 </body>
 </html>"""
 

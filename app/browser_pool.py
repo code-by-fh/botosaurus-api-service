@@ -1,8 +1,11 @@
+import logging
 import queue
 import threading
 
 import botasaurus_driver.core.config as _bota_config
 from botasaurus_driver import Driver
+
+log = logging.getLogger("botosaurus.pool")
 
 
 def _use_shared_display() -> None:
@@ -28,6 +31,7 @@ class BrowserPool:
     def __init__(self, size: int, headless: bool = False):
         self._size = size
         self._headless = headless
+        log.info("Initializing browser pool: size=%d, headless=%s", size, headless)
         # In headed mode, route all browsers to the shared :99 display so they are
         # observable via noVNC. In headless mode botasaurus uses ``--headless=new``
         # and never creates a virtual display, so no routing is needed.
@@ -36,8 +40,16 @@ class BrowserPool:
         self._queue: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
         self._busy = 0
-        for _ in range(size):
-            self._queue.put(Driver(headless=headless))
+        for i in range(size):
+            log.debug("Starting browser worker %d/%d", i + 1, size)
+            driver = Driver(headless=headless)
+            if not headless:
+                try:
+                    driver.maximize_window()
+                except Exception as exc:
+                    log.warning("Could not maximize window for worker %d: %s", i + 1, exc)
+            self._queue.put(driver)
+        log.info("Browser pool ready: %d workers", size)
 
     @property
     def total(self) -> int:
@@ -52,20 +64,28 @@ class BrowserPool:
         try:
             driver = self._queue.get_nowait()
         except queue.Empty:
+            log.warning("Pool exhausted — all %d workers busy", self._size)
             return None
         with self._lock:
             self._busy += 1
+            log.debug("Driver acquired (busy=%d/%d)", self._busy, self._size)
         return driver
 
     def release(self, driver) -> None:
         with self._lock:
             self._busy -= 1
+            log.debug("Driver released (busy=%d/%d)", self._busy, self._size)
         self._queue.put(driver)
 
     def shutdown(self) -> None:
+        log.info("Shutting down browser pool")
+        closed = 0
         while True:
             try:
                 driver = self._queue.get_nowait()
                 driver.close()
+                closed += 1
             except queue.Empty:
                 break
+        log.info("Browser pool shut down (%d drivers closed)", closed)
+

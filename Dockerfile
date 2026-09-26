@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     apt-transport-https \
     xvfb \
     x11vnc \
+    openbox \
+    xdotool \
     x11-utils \
     xdg-utils \
     lsof \

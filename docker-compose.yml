@@ -7,14 +7,15 @@ services:
     env_file:
       - .env
     environment:
-      MAX_WORKERS: "3"
+      MAX_WORKERS: "1"
       DISPLAY: ":99"
       VNC_PORT: "6081"
       # HEADLESS=false (default): browsers run headed on the shared :99 display
       #   and are observable live via noVNC.
       # HEADLESS=true: Chrome runs in real headless mode (no visible window,
       #   lower resource use); the noVNC view stays empty.
-      HEADLESS: "true"
+      HEADLESS: "false"
+      LOG_LEVEL: "DEBUG"
       # API_KEY is loaded from .env file (see env_file above).
       # Generate a strong random key: python -c "import secrets; print(secrets.token_urlsafe(48))"
     restart: unless-stopped

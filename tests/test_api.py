@@ -53,6 +53,42 @@ def test_render_returns_html(client):
     assert resp.text == "<html>hello</html>"
 
 
+def test_render_returns_html_when_format_html(client):
+    c, _ = client
+    with patch("app.main.render", return_value="<html><body><h1>Title</h1></body></html>"):
+        resp = c.post(
+            "/render",
+            json={"url": "https://example.com", "format": "html"},
+            headers=AUTH_HEADER,
+        )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+
+
+def test_render_returns_markdown_when_format_markdown(client):
+    c, _ = client
+    with patch("app.main.render", return_value="<html><body><h1>Title</h1><p>Hello <b>world</b></p></body></html>"):
+        resp = c.post(
+            "/render",
+            json={"url": "https://example.com", "format": "markdown"},
+            headers=AUTH_HEADER,
+        )
+    assert resp.status_code == 200
+    assert "text/markdown" in resp.headers["content-type"]
+    assert "# Title" in resp.text
+    assert "**world**" in resp.text
+
+
+def test_render_rejects_invalid_format(client):
+    c, _ = client
+    resp = c.post(
+        "/render",
+        json={"url": "https://example.com", "format": "pdf"},
+        headers=AUTH_HEADER,
+    )
+    assert resp.status_code == 422
+
+
 def test_render_401_without_api_key(client):
     c, _ = client
     resp = c.post("/render", json={"url": "https://example.com"})

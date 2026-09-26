@@ -70,7 +70,7 @@ The `/vnc` debug view uses HTTP Basic Auth so your browser shows a native login 
 
 ### `POST /render`
 
-Renders a URL and returns the full page HTML.
+Renders a URL and returns the full page content as HTML or Markdown.
 
 **Request body (JSON):**
 
@@ -78,42 +78,52 @@ Renders a URL and returns the full page HTML.
 {
   "url": "https://example.com",
   "wait_for": "#main-content",
-  "timeout": 30
+  "timeout": 30,
+  "format": "html"
 }
 ```
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `url` | string | yes | — | URL to render |
-| `wait_for` | string | no | — | CSS selector to wait for before returning HTML |
+| `wait_for` | string | no | — | CSS selector to wait for before returning |
 | `timeout` | integer | no | 30 | Seconds before timeout |
+| `format` | string | no | `"html"` | Output format: `"html"` or `"markdown"` |
 
-**Success:** `200 text/html` — the fully rendered page source.
+**Success:**
+- `format: "html"` → `200 text/html` — the fully rendered page source.
+- `format: "markdown"` → `200 text/markdown` — the page converted to Markdown (via [markdownify](https://github.com/matthewwithanm/python-markdownify)).
 
 **Errors:**
 
 | Status | Key | Condition |
 |---|---|---|
 | 400 | `invalid_url` | Missing or malformed URL |
+| 422 | validation error | Invalid `format` value |
 | 502 | `navigation_failed` | Browser could not load the page |
 | 503 | `pool_exhausted` | All workers busy |
 | 504 | `timeout` | Page load or selector timed out |
 
 Error body: `{ "error": "<key>", "detail": "<message>" }`
 
-**Example (Python):**
+**Examples (Python):**
 
 ```python
 import requests
 
-response = requests.post("http://localhost:8000/render",
-    headers={"Authorization": "Bearer <your-key>"},
-    json={
-        "url": "https://example.com",
-        "wait_for": "#main-content",
-    },
-)
-html = response.text
+headers = {"Authorization": "Bearer <your-key>"}
+
+# Get rendered HTML
+html = requests.post("http://localhost:8000/render",
+    headers=headers,
+    json={"url": "https://example.com", "wait_for": "#main-content"},
+).text
+
+# Get rendered Markdown
+markdown = requests.post("http://localhost:8000/render",
+    headers=headers,
+    json={"url": "https://example.com", "format": "markdown"},
+).text
 ```
 
 ### `GET /health`
@@ -143,6 +153,7 @@ Returns an HTML page with an embedded NoVNC view. Protected by HTTP Basic Auth (
 | `API_KEY` | — (**required**) | Bearer token for API authentication |
 | `MAX_WORKERS` | `3` | Number of parallel browser instances |
 | `HEADLESS` | `true` | Set to `false` to enable headed mode with NoVNC |
+| `LOG_LEVEL` | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 ## Design
 
