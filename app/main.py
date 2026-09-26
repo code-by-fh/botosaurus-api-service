@@ -104,7 +104,7 @@ def render_url(req: RenderRequest):
         _pool.release(driver)
 
 
-def _vnc_page(host: str = "localhost") -> str:
+def _vnc_page(host: str = "localhost", scheme: str = "http") -> str:
     vnc_port = os.environ.get("VNC_PORT", "6080")
     return f"""<!DOCTYPE html>
 <html>
@@ -116,7 +116,7 @@ def _vnc_page(host: str = "localhost") -> str:
   </style>
 </head>
 <body>
-  <iframe src="http://{host}:{vnc_port}/vnc.html?autoconnect=true&resize=scale&path=websockify"></iframe>
+  <iframe src="{scheme}://{host}:{vnc_port}/vnc.html?autoconnect=true&resize=scale&path=websockify"></iframe>
 </body>
 </html>"""
 
@@ -138,4 +138,5 @@ def health_detail():
 @app.get("/vnc", dependencies=[Depends(verify_basic_auth)])
 def vnc(request: Request):
     host = request.url.hostname or "localhost"
-    return Response(content=_vnc_page(host), media_type="text/html")
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    return Response(content=_vnc_page(host=host, scheme=scheme), media_type="text/html")

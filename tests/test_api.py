@@ -228,7 +228,15 @@ def test_vnc_returns_html_with_iframe(client, monkeypatch):
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert "iframe" in resp.text
-    assert "6081" in resp.text
+    assert "http://testserver:6081" in resp.text
+
+
+def test_vnc_uses_https_scheme_when_forwarded_proto_set(client, monkeypatch):
+    monkeypatch.setenv("VNC_PORT", "6081")
+    c, _ = client
+    resp = c.get("/vnc", auth=("admin", TEST_API_KEY), headers={"x-forwarded-proto": "https"})
+    assert resp.status_code == 200
+    assert 'src="https://testserver:6081' in resp.text
 
 
 def test_vnc_requires_auth(client):
