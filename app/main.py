@@ -4,6 +4,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import Literal
 
+from bs4 import BeautifulSoup
 from fastapi import Depends, FastAPI, HTTPException, Response
 from markdownify import markdownify
 from pydantic import BaseModel, HttpUrl
@@ -61,7 +62,9 @@ def render_url(req: RenderRequest):
     try:
         html = render(driver, str(req.url), req.wait_for, req.timeout)
         if req.format == "markdown":
-            md = markdownify(html, heading_style="ATX", strip=["img", "script", "style"])
+            soup = BeautifulSoup(html, "html.parser")
+            body_html = str(soup.body) if soup.body else html
+            md = markdownify(body_html, heading_style="ATX", strip=["img", "script", "style"]).strip()
             elapsed = time.monotonic() - t0
             log.info("Rendered %s as markdown in %.2fs", req.url, elapsed)
             return Response(content=md, media_type="text/markdown; charset=utf-8")

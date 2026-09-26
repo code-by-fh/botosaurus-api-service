@@ -67,7 +67,7 @@ def test_render_returns_html_when_format_html(client):
 
 def test_render_returns_markdown_when_format_markdown(client):
     c, _ = client
-    with patch("app.main.render", return_value="<html><body><h1>Title</h1><p>Hello <b>world</b></p></body></html>"):
+    with patch("app.main.render", return_value="<html><head><title>Head Content</title></head><body><h1>Title</h1><p>Hello <b>world</b></p></body></html>"):
         resp = c.post(
             "/render",
             json={"url": "https://example.com", "format": "markdown"},
@@ -77,6 +77,7 @@ def test_render_returns_markdown_when_format_markdown(client):
     assert "text/markdown" in resp.headers["content-type"]
     assert "# Title" in resp.text
     assert "**world**" in resp.text
+    assert "Head Content" not in resp.text
 
 
 def test_render_rejects_invalid_format(client):
