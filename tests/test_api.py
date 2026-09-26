@@ -80,6 +80,48 @@ def test_render_returns_markdown_when_format_markdown(client):
     assert "Head Content" not in resp.text
 
 
+def test_render_extracts_specific_selector_as_html(client):
+    c, _ = client
+    html = "<html><body><header>Nav</header><main id='target'><h1>Article</h1></main></body></html>"
+    with patch("app.main.render", return_value=html):
+        resp = c.post(
+            "/render",
+            json={"url": "https://example.com", "selector": "#target"},
+            headers=AUTH_HEADER,
+        )
+    assert resp.status_code == 200
+    assert resp.text == '<main id="target"><h1>Article</h1></main>'
+    assert "<header>" not in resp.text
+
+
+def test_render_extracts_specific_selector_as_markdown(client):
+    c, _ = client
+    html = "<html><body><header>Nav</header><main id='target'><h1>Article</h1><p>Text</p></main></body></html>"
+    with patch("app.main.render", return_value=html):
+        resp = c.post(
+            "/render",
+            json={"url": "https://example.com", "element": "#target", "format": "markdown"},
+            headers=AUTH_HEADER,
+        )
+    assert resp.status_code == 200
+    assert "# Article" in resp.text
+    assert "Text" in resp.text
+    assert "Nav" not in resp.text
+
+
+def test_render_returns_404_when_selector_not_found(client):
+    c, _ = client
+    html = "<html><body><div>Content</div></body></html>"
+    with patch("app.main.render", return_value=html):
+        resp = c.post(
+            "/render",
+            json={"url": "https://example.com", "selector": "#nonexistent"},
+            headers=AUTH_HEADER,
+        )
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["error"] == "element_not_found"
+
+
 def test_render_rejects_invalid_format(client):
     c, _ = client
     resp = c.post(

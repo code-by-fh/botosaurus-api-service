@@ -7,7 +7,8 @@ from typing import Literal
 from bs4 import BeautifulSoup
 from fastapi import Depends, FastAPI, HTTPException, Response
 from markdownify import markdownify
-from pydantic import BaseModel, HttpUrl
+from pydantic import AliasChoices, BaseModel, Field, HttpUrl
+
 
 import app.logging_config  # noqa: F401 — triggers logging setup on import
 from app.auth import verify_api_key, verify_basic_auth
@@ -45,6 +46,11 @@ app = FastAPI(lifespan=lifespan)
 class RenderRequest(BaseModel):
     url: HttpUrl
     wait_for: str | None = None
+    selector: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("selector", "element", "target"),
+        description="Optional CSS selector of DOM element to extract and return",
+    )
     timeout: int = 30
     format: Literal["html", "markdown"] = "html"
 
@@ -52,8 +58,8 @@ class RenderRequest(BaseModel):
 @app.post("/render", dependencies=[Depends(verify_api_key)])
 def render_url(req: RenderRequest):
     log.debug(
-        "POST /render url=%s format=%s wait_for=%s timeout=%d",
-        req.url, req.format, req.wait_for, req.timeout,
+        "POST /render url=%s format=%s selector=%s wait_for=%s timeout=%d",
+        req.url, req.format, req.selector, req.wait_for, req.timeout,
     )
     driver = _pool.acquire()
     if driver is None:
@@ -61,16 +67,33 @@ def render_url(req: RenderRequest):
     t0 = time.monotonic()
     try:
         html = render(driver, str(req.url), req.wait_for, req.timeout)
+        soup = BeautifulSoup(html, "html.parser")
+
+        if req.selector:
+            matched = soup.select_one(req.selector)
+            if not matched:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": "element_not_found",
+                        "detail": f"Element matching selector '{req.selector}' was not found",
+                    },
+                )
+            target_html = str(matched)
+        elif req.format == "markdown":
+            target_html = str(soup.body) if soup.body else html
+        else:
+            target_html = html
+
         if req.format == "markdown":
-            soup = BeautifulSoup(html, "html.parser")
-            body_html = str(soup.body) if soup.body else html
-            md = markdownify(body_html, heading_style="ATX", strip=["img", "script", "style"]).strip()
+            md = markdownify(target_html, heading_style="ATX", strip=["img", "script", "style"]).strip()
             elapsed = time.monotonic() - t0
             log.info("Rendered %s as markdown in %.2fs", req.url, elapsed)
             return Response(content=md, media_type="text/markdown; charset=utf-8")
+
         elapsed = time.monotonic() - t0
         log.info("Rendered %s as html in %.2fs", req.url, elapsed)
-        return Response(content=html, media_type="text/html")
+        return Response(content=target_html, media_type="text/html")
     except NavigationError as exc:
         log.error("Navigation failed for %s: %s", req.url, exc)
         raise HTTPException(status_code=502, detail={"error": "navigation_failed", "detail": str(exc)})

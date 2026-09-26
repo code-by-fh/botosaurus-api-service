@@ -78,27 +78,30 @@ Renders a URL and returns the full page content as HTML or Markdown.
 {
   "url": "https://example.com",
   "wait_for": "#main-content",
+  "selector": ".article-body",
   "timeout": 30,
-  "format": "html"
+  "format": "markdown"
 }
 ```
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `url` | string | yes | — | URL to render |
-| `wait_for` | string | no | — | CSS selector to wait for before returning |
+| `wait_for` | string | no | — | CSS selector to wait for in browser before rendering |
+| `selector` | string | no | — | CSS selector of specific DOM element to extract (aliases: `element`, `target`). If omitted, full content is returned. |
 | `timeout` | integer | no | 30 | Seconds before timeout |
 | `format` | string | no | `"html"` | Output format: `"html"` or `"markdown"` |
 
 **Success:**
-- `format: "html"` → `200 text/html` — the fully rendered page source.
-- `format: "markdown"` → `200 text/markdown` — the page converted to Markdown (via [markdownify](https://github.com/matthewwithanm/python-markdownify)).
+- `format: "html"` → `200 text/html` — the rendered page source (or targeted DOM element).
+- `format: "markdown"` → `200 text/markdown` — the body content (or targeted DOM element) converted to Markdown (via [markdownify](https://github.com/matthewwithanm/python-markdownify)).
 
 **Errors:**
 
 | Status | Key | Condition |
 |---|---|---|
 | 400 | `invalid_url` | Missing or malformed URL |
+| 404 | `element_not_found` | Specified `selector` DOM element was not found on the page |
 | 422 | validation error | Invalid `format` value |
 | 502 | `navigation_failed` | Browser could not load the page |
 | 503 | `pool_exhausted` | All workers busy |
