@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 from bs4 import BeautifulSoup
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from markdownify import markdownify
 from pydantic import AliasChoices, BaseModel, Field, HttpUrl
 
@@ -104,7 +104,7 @@ def render_url(req: RenderRequest):
         _pool.release(driver)
 
 
-def _vnc_page() -> str:
+def _vnc_page(host: str = "localhost") -> str:
     vnc_port = os.environ.get("VNC_PORT", "6080")
     return f"""<!DOCTYPE html>
 <html>
@@ -116,7 +116,7 @@ def _vnc_page() -> str:
   </style>
 </head>
 <body>
-  <iframe src="http://localhost:{vnc_port}/vnc.html?autoconnect=true&resize=scale&path=websockify"></iframe>
+  <iframe src="http://{host}:{vnc_port}/vnc.html?autoconnect=true&resize=scale&path=websockify"></iframe>
 </body>
 </html>"""
 
@@ -136,5 +136,6 @@ def health_detail():
 
 
 @app.get("/vnc", dependencies=[Depends(verify_basic_auth)])
-def vnc():
-    return Response(content=_vnc_page(), media_type="text/html")
+def vnc(request: Request):
+    host = request.url.hostname or "localhost"
+    return Response(content=_vnc_page(host), media_type="text/html")
