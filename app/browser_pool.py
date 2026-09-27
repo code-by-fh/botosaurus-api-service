@@ -28,13 +28,20 @@ def _use_shared_display() -> None:
 
 
 class BrowserPool:
-    def __init__(self, size: int, headless: bool = False, proxy: str | None = None):
+    def __init__(
+        self,
+        size: int,
+        headless: bool = False,
+        proxy: str | None = None,
+        block_images: bool = True,
+        wait_for_complete_page_load: bool = False,
+    ):
         self._size = size
         self._headless = headless
         self._proxy = proxy
         log.info(
-            "Initializing browser pool: size=%d, headless=%s, proxy=%s",
-            size, headless, proxy,
+            "Initializing browser pool: size=%d, headless=%s, proxy=%s, block_images=%s, wait_for_complete_page_load=%s",
+            size, headless, proxy, block_images, wait_for_complete_page_load,
         )
         # In headed mode, route all browsers to the shared :99 display so they are
         # observable via noVNC. In headless mode botasaurus uses ``--headless=new``
@@ -46,7 +53,12 @@ class BrowserPool:
         self._busy = 0
         for i in range(size):
             log.debug("Starting browser worker %d/%d", i + 1, size)
-            driver = Driver(headless=headless, proxy=proxy)
+            driver = Driver(
+                headless=headless,
+                proxy=proxy,
+                block_images=block_images,
+                wait_for_complete_page_load=wait_for_complete_page_load,
+            )
             if not headless:
                 try:
                     driver.maximize_window()

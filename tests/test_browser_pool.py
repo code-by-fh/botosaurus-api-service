@@ -29,12 +29,22 @@ def test_headless_pool_does_not_force_shared_display():
 
 def test_headed_pool_creates_headed_drivers():
     _, driver_cls = _make_pool(size=1, headless=False)
-    driver_cls.assert_called_with(headless=False, proxy=None)
+    driver_cls.assert_called_with(
+        headless=False,
+        proxy=None,
+        block_images=True,
+        wait_for_complete_page_load=False,
+    )
 
 
 def test_headless_pool_creates_headless_drivers():
     _, driver_cls = _make_pool(size=1, headless=True)
-    driver_cls.assert_called_with(headless=True, proxy=None)
+    driver_cls.assert_called_with(
+        headless=True,
+        proxy=None,
+        block_images=True,
+        wait_for_complete_page_load=False,
+    )
 
 
 def test_pool_passes_proxy_to_drivers():
@@ -42,7 +52,12 @@ def test_pool_passes_proxy_to_drivers():
     mock_driver_cls.side_effect = [MagicMock()]
     with patch("app.browser_pool.Driver", mock_driver_cls):
         pool = BrowserPool(size=1, headless=True, proxy="http://proxy.example:8888")
-    mock_driver_cls.assert_called_with(headless=True, proxy="http://proxy.example:8888")
+    mock_driver_cls.assert_called_with(
+        headless=True,
+        proxy="http://proxy.example:8888",
+        block_images=True,
+        wait_for_complete_page_load=False,
+    )
     assert pool.has_proxy is True
 
 

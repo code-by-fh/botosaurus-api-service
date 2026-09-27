@@ -31,11 +31,18 @@ def _env_bool(name: str, default: bool) -> bool:
 async def lifespan(app: FastAPI):
     global _pool
     proxy_url = os.environ.get("HOME_PROXY") or os.environ.get("PROXY")
-    log.info("Starting up botosaurus-api-service (proxy=%s)", proxy_url)
+    block_images = _env_bool("BLOCK_IMAGES", True)
+    wait_for_complete_page_load = _env_bool("WAIT_FOR_COMPLETE_PAGE_LOAD", False)
+    log.info(
+        "Starting up botosaurus-api-service (proxy=%s, block_images=%s, wait_for_complete_page_load=%s)",
+        proxy_url, block_images, wait_for_complete_page_load,
+    )
     _pool = BrowserPool(
         size=int(os.environ.get("MAX_WORKERS", "3")),
         headless=_env_bool("HEADLESS", False),
         proxy=proxy_url,
+        block_images=block_images,
+        wait_for_complete_page_load=wait_for_complete_page_load,
     )
     yield
     log.info("Shutting down botosaurus-api-service")
