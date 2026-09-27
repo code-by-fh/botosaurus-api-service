@@ -33,15 +33,19 @@ class BrowserPool:
         size: int,
         headless: bool = False,
         proxy: str | None = None,
-        block_images: bool = True,
+        block_images_and_css: bool = True,
         wait_for_complete_page_load: bool = False,
     ):
         self._size = size
         self._headless = headless
         self._proxy = proxy
         log.info(
-            "Initializing browser pool: size=%d, headless=%s, proxy=%s, block_images=%s, wait_for_complete_page_load=%s",
-            size, headless, proxy, block_images, wait_for_complete_page_load,
+            "Initializing browser pool: size=%d, headless=%s, proxy=%s, block_images_and_css=%s, wait_for_complete_page_load=%s",
+            size,
+            headless,
+            proxy,
+            block_images_and_css,
+            wait_for_complete_page_load,
         )
         # In headed mode, route all browsers to the shared :99 display so they are
         # observable via noVNC. In headless mode botasaurus uses ``--headless=new``
@@ -56,14 +60,16 @@ class BrowserPool:
             driver = Driver(
                 headless=headless,
                 proxy=proxy,
-                block_images=block_images,
+                block_images_and_css=block_images_and_css,
                 wait_for_complete_page_load=wait_for_complete_page_load,
             )
             if not headless:
                 try:
                     driver.maximize_window()
                 except Exception as exc:
-                    log.warning("Could not maximize window for worker %d: %s", i + 1, exc)
+                    log.warning(
+                        "Could not maximize window for worker %d: %s", i + 1, exc
+                    )
             self._queue.put(driver)
         log.info("Browser pool ready: %d workers", size)
 
@@ -108,4 +114,3 @@ class BrowserPool:
             except queue.Empty:
                 break
         log.info("Browser pool shut down (%d drivers closed)", closed)
-

@@ -32,7 +32,7 @@ def test_headed_pool_creates_headed_drivers():
     driver_cls.assert_called_with(
         headless=False,
         proxy=None,
-        block_images=True,
+        block_images_and_css=True,
         wait_for_complete_page_load=False,
     )
 
@@ -42,7 +42,7 @@ def test_headless_pool_creates_headless_drivers():
     driver_cls.assert_called_with(
         headless=True,
         proxy=None,
-        block_images=True,
+        block_images_and_css=True,
         wait_for_complete_page_load=False,
     )
 
@@ -55,7 +55,7 @@ def test_pool_passes_proxy_to_drivers():
     mock_driver_cls.assert_called_with(
         headless=True,
         proxy="http://proxy.example:8888",
-        block_images=True,
+        block_images_and_css=True,
         wait_for_complete_page_load=False,
     )
     assert pool.has_proxy is True
