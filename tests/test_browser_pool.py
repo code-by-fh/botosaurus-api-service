@@ -44,8 +44,9 @@ def test_pool_total_matches_size():
 
 def test_acquire_returns_driver():
     pool, _ = _make_pool(size=1)
-    driver = pool.acquire()
+    driver, is_on_demand = pool.acquire()
     assert driver is not None
+    assert is_on_demand is False
 
 
 def test_acquire_increments_busy():
@@ -57,28 +58,32 @@ def test_acquire_increments_busy():
 def test_acquire_returns_none_when_pool_exhausted():
     pool, _ = _make_pool(size=1)
     pool.acquire()  # exhaust
-    assert pool.acquire() is None
+    driver, is_on_demand = pool.acquire()
+    assert driver is None
+    assert is_on_demand is False
 
 
 def test_release_decrements_busy():
     pool, _ = _make_pool(size=1)
-    driver = pool.acquire()
-    pool.release(driver)
+    driver, is_on_demand = pool.acquire()
+    pool.release(driver, is_on_demand)
     assert pool.busy == 0
 
 
 def test_release_makes_driver_available_again():
     pool, _ = _make_pool(size=1)
-    driver = pool.acquire()
-    pool.release(driver)
-    assert pool.acquire() is not None
+    driver, is_on_demand = pool.acquire()
+    pool.release(driver, is_on_demand)
+    d2, _ = pool.acquire()
+    assert d2 is not None
 
 
 def test_shutdown_closes_all_drivers():
     pool, _ = _make_pool(size=2)
-    drivers = [pool.acquire(), pool.acquire()]
-    for d in drivers:
-        pool.release(d)
+    d1, _ = pool.acquire()
+    d2, _ = pool.acquire()
+    pool.release(d1)
+    pool.release(d2)
     pool.shutdown()
-    for d in drivers:
-        d.close.assert_called_once()
+    d1.close.assert_called_once()
+    d2.close.assert_called_once()

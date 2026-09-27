@@ -60,18 +60,44 @@ class BrowserPool:
         with self._lock:
             return self._busy
 
-    def acquire(self):
+    def acquire(self, proxy: str | None = None) -> tuple[object | None, bool]:
+        """Acquire a driver. If proxy is specified, creates an on-demand driver.
+
+        Returns a tuple: (driver, is_on_demand).
+        """
+        if proxy:
+            log.debug("Creating on-demand driver with proxy=%s", proxy)
+            try:
+                driver = Driver(headless=self._headless, proxy=proxy)
+                if not self._headless:
+                    try:
+                        driver.maximize_window()
+                    except Exception as exc:
+                        log.warning("Could not maximize window for proxy worker: %s", exc)
+                return driver, True
+            except Exception as exc:
+                log.error("Failed to create on-demand proxy driver: %s", exc)
+                return None, True
+
         try:
             driver = self._queue.get_nowait()
         except queue.Empty:
             log.warning("Pool exhausted — all %d workers busy", self._size)
-            return None
+            return None, False
         with self._lock:
             self._busy += 1
             log.debug("Driver acquired (busy=%d/%d)", self._busy, self._size)
-        return driver
+        return driver, False
 
-    def release(self, driver) -> None:
+    def release(self, driver, is_on_demand: bool = False) -> None:
+        if is_on_demand:
+            log.debug("Closing on-demand proxy driver")
+            try:
+                driver.close()
+            except Exception as exc:
+                log.warning("Error closing on-demand driver: %s", exc)
+            return
+
         with self._lock:
             self._busy -= 1
             log.debug("Driver released (busy=%d/%d)", self._busy, self._size)

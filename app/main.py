@@ -53,15 +53,28 @@ class RenderRequest(BaseModel):
     )
     timeout: int = 30
     format: Literal["html", "markdown"] = "html"
+    use_proxy: bool = False
 
 
 @app.post("/render", dependencies=[Depends(verify_api_key)])
 def render_url(req: RenderRequest):
     log.debug(
-        "POST /render url=%s format=%s selector=%s wait_for=%s timeout=%d",
-        req.url, req.format, req.selector, req.wait_for, req.timeout,
+        "POST /render url=%s format=%s selector=%s wait_for=%s timeout=%d use_proxy=%s",
+        req.url, req.format, req.selector, req.wait_for, req.timeout, req.use_proxy,
     )
-    driver = _pool.acquire()
+    proxy_url = None
+    if req.use_proxy:
+        proxy_url = os.environ.get("HOME_PROXY") or os.environ.get("PROXY")
+        if not proxy_url:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "proxy_not_configured",
+                    "detail": "use_proxy is true, but HOME_PROXY environment variable is not set",
+                },
+            )
+
+    driver, is_on_demand = _pool.acquire(proxy=proxy_url)
     if driver is None:
         raise HTTPException(status_code=503, detail={"error": "pool_exhausted"})
     t0 = time.monotonic()
@@ -101,7 +114,7 @@ def render_url(req: RenderRequest):
         log.error("Render timeout for %s: %s", req.url, exc)
         raise HTTPException(status_code=504, detail={"error": "timeout", "detail": str(exc)})
     finally:
-        _pool.release(driver)
+        _pool.release(driver, is_on_demand=is_on_demand)
 
 
 def _vnc_page(host: str = "localhost", scheme: str = "http") -> str:
