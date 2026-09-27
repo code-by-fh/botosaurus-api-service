@@ -28,10 +28,14 @@ def _use_shared_display() -> None:
 
 
 class BrowserPool:
-    def __init__(self, size: int, headless: bool = False):
+    def __init__(self, size: int, headless: bool = False, proxy: str | None = None):
         self._size = size
         self._headless = headless
-        log.info("Initializing browser pool: size=%d, headless=%s", size, headless)
+        self._proxy = proxy
+        log.info(
+            "Initializing browser pool: size=%d, headless=%s, proxy=%s",
+            size, headless, proxy,
+        )
         # In headed mode, route all browsers to the shared :99 display so they are
         # observable via noVNC. In headless mode botasaurus uses ``--headless=new``
         # and never creates a virtual display, so no routing is needed.
@@ -42,7 +46,7 @@ class BrowserPool:
         self._busy = 0
         for i in range(size):
             log.debug("Starting browser worker %d/%d", i + 1, size)
-            driver = Driver(headless=headless)
+            driver = Driver(headless=headless, proxy=proxy)
             if not headless:
                 try:
                     driver.maximize_window()
@@ -60,44 +64,22 @@ class BrowserPool:
         with self._lock:
             return self._busy
 
-    def acquire(self, proxy: str | None = None) -> tuple[object | None, bool]:
-        """Acquire a driver. If proxy is specified, creates an on-demand driver.
+    @property
+    def has_proxy(self) -> bool:
+        return bool(self._proxy)
 
-        Returns a tuple: (driver, is_on_demand).
-        """
-        if proxy:
-            log.debug("Creating on-demand driver with proxy=%s", proxy)
-            try:
-                driver = Driver(headless=self._headless, proxy=proxy)
-                if not self._headless:
-                    try:
-                        driver.maximize_window()
-                    except Exception as exc:
-                        log.warning("Could not maximize window for proxy worker: %s", exc)
-                return driver, True
-            except Exception as exc:
-                log.error("Failed to create on-demand proxy driver: %s", exc)
-                return None, True
-
+    def acquire(self):
         try:
             driver = self._queue.get_nowait()
         except queue.Empty:
             log.warning("Pool exhausted — all %d workers busy", self._size)
-            return None, False
+            return None
         with self._lock:
             self._busy += 1
             log.debug("Driver acquired (busy=%d/%d)", self._busy, self._size)
-        return driver, False
+        return driver
 
-    def release(self, driver, is_on_demand: bool = False) -> None:
-        if is_on_demand:
-            log.debug("Closing on-demand proxy driver")
-            try:
-                driver.close()
-            except Exception as exc:
-                log.warning("Error closing on-demand driver: %s", exc)
-            return
-
+    def release(self, driver) -> None:
         with self._lock:
             self._busy -= 1
             log.debug("Driver released (busy=%d/%d)", self._busy, self._size)

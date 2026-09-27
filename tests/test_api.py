@@ -28,10 +28,44 @@ def test_env_bool_returns_default_when_unset(monkeypatch):
 @pytest.fixture
 def mock_pool():
     pool = MagicMock()
-    pool.acquire.return_value = (MagicMock(), False)
+    pool.acquire.return_value = MagicMock()
     pool.busy = 1
     pool.total = 3
+    pool.has_proxy = False
     return pool
+
+
+def test_render_503_when_pool_exhausted(client, mock_pool):
+    c, pool = client
+    pool.acquire.return_value = None
+    resp = c.post("/render", json={"url": "https://example.com"}, headers=AUTH_HEADER)
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["error"] == "pool_exhausted"
+
+
+def test_render_with_use_proxy_raises_400_if_proxy_not_set(client, mock_pool, monkeypatch):
+    mock_pool.has_proxy = False
+    c, _ = client
+    resp = c.post(
+        "/render",
+        json={"url": "https://example.com", "use_proxy": True},
+        headers=AUTH_HEADER,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "proxy_not_configured"
+
+
+def test_render_with_use_proxy_succeeds_when_proxy_configured(client, mock_pool, monkeypatch):
+    mock_pool.has_proxy = True
+    c, pool = client
+    with patch("app.main.render", return_value="<html>proxied</html>"):
+        resp = c.post(
+            "/render",
+            json={"url": "https://example.com", "use_proxy": True},
+            headers=AUTH_HEADER,
+        )
+    assert resp.status_code == 200
+    assert resp.text == "<html>proxied</html>"
 
 
 @pytest.fixture
@@ -150,15 +184,14 @@ def test_render_401_with_wrong_api_key(client):
 
 def test_render_503_when_pool_exhausted(client, mock_pool):
     c, pool = client
-    pool.acquire.return_value = (None, False)
+    pool.acquire.return_value = None
     resp = c.post("/render", json={"url": "https://example.com"}, headers=AUTH_HEADER)
     assert resp.status_code == 503
     assert resp.json()["detail"]["error"] == "pool_exhausted"
 
 
-def test_render_with_use_proxy_raises_400_if_proxy_not_set(client, monkeypatch):
-    monkeypatch.delenv("HOME_PROXY", raising=False)
-    monkeypatch.delenv("PROXY", raising=False)
+def test_render_with_use_proxy_raises_400_if_proxy_not_set(client, mock_pool, monkeypatch):
+    mock_pool.has_proxy = False
     c, _ = client
     resp = c.post(
         "/render",
@@ -170,7 +203,7 @@ def test_render_with_use_proxy_raises_400_if_proxy_not_set(client, monkeypatch):
 
 
 def test_render_with_use_proxy_uses_home_proxy(client, mock_pool, monkeypatch):
-    monkeypatch.setenv("HOME_PROXY", "http://proxy.example:8888")
+    mock_pool.has_proxy = True
     c, pool = client
     with patch("app.main.render", return_value="<html>proxied</html>"):
         resp = c.post(
@@ -179,7 +212,7 @@ def test_render_with_use_proxy_uses_home_proxy(client, mock_pool, monkeypatch):
             headers=AUTH_HEADER,
         )
     assert resp.status_code == 200
-    pool.acquire.assert_called_with(proxy="http://proxy.example:8888")
+    assert resp.text == "<html>proxied</html>"
 
 
 def test_render_422_on_missing_url(client):

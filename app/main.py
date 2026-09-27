@@ -30,10 +30,12 @@ def _env_bool(name: str, default: bool) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
-    log.info("Starting up botosaurus-api-service")
+    proxy_url = os.environ.get("HOME_PROXY") or os.environ.get("PROXY")
+    log.info("Starting up botosaurus-api-service (proxy=%s)", proxy_url)
     _pool = BrowserPool(
         size=int(os.environ.get("MAX_WORKERS", "3")),
         headless=_env_bool("HEADLESS", False),
+        proxy=proxy_url,
     )
     yield
     log.info("Shutting down botosaurus-api-service")
@@ -56,13 +58,9 @@ class RenderRequest(BaseModel):
     use_proxy: bool = False
 
 
-def _resolve_proxy_url(use_proxy: bool) -> str | None:
-    """Return configured proxy URL if requested, or raise HTTPException if missing."""
-    if not use_proxy:
-        return None
-
-    proxy_url = os.environ.get("HOME_PROXY") or os.environ.get("PROXY")
-    if not proxy_url:
+def _verify_proxy_config(use_proxy: bool) -> None:
+    """Verify proxy configuration if use_proxy is requested."""
+    if use_proxy and not (_pool and _pool.has_proxy):
         raise HTTPException(
             status_code=400,
             detail={
@@ -70,7 +68,6 @@ def _resolve_proxy_url(use_proxy: bool) -> str | None:
                 "detail": "use_proxy is true, but HOME_PROXY environment variable is not set",
             },
         )
-    return proxy_url
 
 
 def _process_dom_content(
@@ -115,9 +112,9 @@ def render_url(req: RenderRequest) -> Response:
         "POST /render url=%s format=%s selector=%s wait_for=%s timeout=%d use_proxy=%s",
         req.url, req.format, req.selector, req.wait_for, req.timeout, req.use_proxy,
     )
-    proxy_url = _resolve_proxy_url(req.use_proxy)
+    _verify_proxy_config(req.use_proxy)
 
-    driver, is_on_demand = _pool.acquire(proxy=proxy_url)
+    driver = _pool.acquire()
     if driver is None:
         raise HTTPException(status_code=503, detail={"error": "pool_exhausted"})
 
@@ -136,7 +133,7 @@ def render_url(req: RenderRequest) -> Response:
         log.error("Render timeout for %s: %s", req.url, exc)
         raise HTTPException(status_code=504, detail={"error": "timeout", "detail": str(exc)})
     finally:
-        _pool.release(driver, is_on_demand=is_on_demand)
+        _pool.release(driver)
 
 
 def _vnc_page(host: str = "localhost", scheme: str = "http") -> str:
