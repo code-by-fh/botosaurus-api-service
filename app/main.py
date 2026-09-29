@@ -5,6 +5,7 @@ Start with ``uvicorn --factory app.main:create_app``.
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -26,6 +27,7 @@ from app.openapi_docs import (
 )
 from app.runtime import Runtime, start_runtime
 from app.scraping.scraper import ScrapeRequest
+from app.novnc_proxy import novnc_proxy_router
 from app.vnc import vnc_page
 
 log = logging.getLogger("render.api")
@@ -166,4 +168,8 @@ def create_app(
         _vnc_router(resolved),
     ):
         application.include_router(router)
+    novnc_prefix = os.environ.get("NOVNC_PREFIX", "").strip()
+    if novnc_prefix:
+        log.info("noVNC proxy mounted at %s", novnc_prefix)
+        application.include_router(novnc_proxy_router(novnc_prefix, resolved.vnc_enabled))
     return application
