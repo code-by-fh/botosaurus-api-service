@@ -60,14 +60,21 @@ async def _render(body: RenderRequest, runtime: Runtime) -> Response:
     output = await asyncio.to_thread(
         build_output, result.html, OutputSpec(body.selector, body.format)
     )
-    log.info("Rendered %s via %s in %.2fs", body.url, result.engine, time.monotonic() - started)
+    log.info(
+        "Rendered %s via %s in %.2fs",
+        body.url,
+        result.engine,
+        time.monotonic() - started,
+    )
     headers = {
         "X-Render-Engine": result.engine,
         "X-Render-Stable": str(result.stable).lower(),
         "X-Final-Url": quote(result.final_url, safe=URL_SAFE_CHARACTERS),
         "X-Upstream-Status": str(result.upstream_status),
     }
-    return Response(content=output.content, media_type=output.media_type, headers=headers)
+    return Response(
+        content=output.content, media_type=output.media_type, headers=headers
+    )
 
 
 def _health_router(settings: Settings) -> APIRouter:
@@ -157,6 +164,10 @@ def create_app(
     )
     install_error_handling(application)
     install_openapi(application)
-    for router in (_health_router(resolved), _render_router(resolved), _vnc_router(resolved)):
+    for router in (
+        _health_router(resolved),
+        _render_router(resolved),
+        _vnc_router(resolved),
+    ):
         application.include_router(router)
     return application
