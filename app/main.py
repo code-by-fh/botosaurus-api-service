@@ -19,6 +19,7 @@ from app.auth import basic_guard, bearer_guard
 from app.config import Settings, load_settings
 from app.content.output import OutputSpec, build_output
 from app.errors import install_error_handling
+from app.novnc_proxy import novnc_proxy_router
 from app.openapi_docs import (
     TRACE_REQUEST_PARAMETER,
     UNAUTHORIZED_RESPONSE,
@@ -27,7 +28,6 @@ from app.openapi_docs import (
 )
 from app.runtime import Runtime, start_runtime
 from app.scraping.scraper import ScrapeRequest
-from app.novnc_proxy import novnc_proxy_router
 from app.vnc import vnc_page
 
 log = logging.getLogger("render.api")

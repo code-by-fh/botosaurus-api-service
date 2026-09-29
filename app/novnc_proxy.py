@@ -85,35 +85,42 @@ def novnc_proxy_router(prefix: str, vnc_enabled: bool) -> APIRouter:
     return router
 
 
+async def _relay_from_client(
+    ws: WebSocket, upstream: websockets.WebSocketClientProtocol
+) -> None:
+    """Relay messages from browser client to upstream noVNC server."""
+    try:
+        while True:
+            msg = await ws.receive()
+            raw_bytes = msg.get("bytes")
+            raw_text = msg.get("text")
+            if raw_bytes is not None:
+                await upstream.send(raw_bytes)
+            elif raw_text is not None:
+                await upstream.send(raw_text)
+    except Exception:
+        pass
+
+
+async def _relay_from_upstream(
+    ws: WebSocket, upstream: websockets.WebSocketClientProtocol
+) -> None:
+    """Relay messages from upstream noVNC server to browser client."""
+    try:
+        async for msg in upstream:
+            if isinstance(msg, bytes):
+                await ws.send_bytes(msg)
+            else:
+                await ws.send_text(msg)
+    except Exception:
+        pass
+
+
 async def _relay(ws: WebSocket, upstream: websockets.WebSocketClientProtocol) -> None:
     """Relay messages in both directions until one side disconnects."""
-
-    async def from_client() -> None:
-        try:
-            while True:
-                msg = await ws.receive()
-                raw_bytes = msg.get("bytes")
-                raw_text = msg.get("text")
-                if raw_bytes is not None:
-                    await upstream.send(raw_bytes)
-                elif raw_text is not None:
-                    await upstream.send(raw_text)
-        except Exception:
-            pass
-
-    async def from_upstream() -> None:
-        try:
-            async for msg in upstream:
-                if isinstance(msg, bytes):
-                    await ws.send_bytes(msg)
-                else:
-                    await ws.send_text(msg)
-        except Exception:
-            pass
-
     tasks = {
-        asyncio.create_task(from_client()),
-        asyncio.create_task(from_upstream()),
+        asyncio.create_task(_relay_from_client(ws, upstream)),
+        asyncio.create_task(_relay_from_upstream(ws, upstream)),
     }
     _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     for task in pending:
