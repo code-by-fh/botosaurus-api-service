@@ -36,13 +36,20 @@ def novnc_proxy_router(prefix: str, vnc_enabled: bool) -> APIRouter:
     :param prefix: URL prefix, e.g. ``"/novnc"``; must start with ``/``.
     :param vnc_enabled: when ``False`` every route returns 404.
     """
-    router = APIRouter()
+    router = APIRouter(tags=["VNC"])
     clean = "/" + prefix.strip("/")
     # FastAPI route paths must not end with a slash.
     static_path = clean + "/{path:path}"
     ws_path = clean + "/websockify"
 
-    @router.get(static_path)
+    @router.get(
+        static_path,
+        summary="Proxy noVNC static assets",
+        description=(
+            "Proxies HTML, JavaScript, CSS, and asset files from the internal noVNC server "
+            "to the API port when NOVNC_PREFIX is configured."
+        ),
+    )
     async def novnc_static(path: str, request: Request) -> Response:
         """Proxy noVNC static files (HTML, JS, CSS, …) from the local server."""
         if not vnc_enabled:

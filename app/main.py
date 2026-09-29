@@ -78,7 +78,7 @@ async def _render(body: RenderRequest, runtime: Runtime) -> Response:
 
 
 def _health_router(settings: Settings) -> APIRouter:
-    router = APIRouter()
+    router = APIRouter(tags=["Health"])
 
     @router.get("/health", summary="Liveness probe (no authentication)")
     def health() -> dict:
@@ -103,7 +103,7 @@ def _health_router(settings: Settings) -> APIRouter:
 
 
 def _render_router(settings: Settings) -> APIRouter:
-    router = APIRouter(dependencies=[Depends(bearer_guard(settings.api_keys))])
+    router = APIRouter(tags=["Render"], dependencies=[Depends(bearer_guard(settings.api_keys))])
 
     @router.post(
         f"{API_PREFIX}/render",
@@ -119,16 +119,21 @@ def _render_router(settings: Settings) -> APIRouter:
 
 
 def _vnc_router(settings: Settings) -> APIRouter:
-    router = APIRouter(dependencies=[Depends(basic_guard(settings.api_keys))])
+    router = APIRouter(tags=["VNC"], dependencies=[Depends(basic_guard(settings.api_keys))])
 
     @router.get(
         "/vnc",
-        summary="Live view of the headed browsers (requires ENABLE_VNC)",
+        summary="noVNC live view of headed Chrome instances",
+        description=(
+            "Serves an HTML page embedding the noVNC viewer in an iframe. Requires ENABLE_VNC=true. "
+            "Protected by HTTP Basic Auth (use any username, password = API key). When NOVNC_PREFIX is "
+            "set (e.g. /novnc), static files and WebSocket traffic are proxied through FastAPI on port 8000."
+        ),
         response_class=Response,
         responses={
-            200: {"description": "Viewer page", "content": {"text/html": {}}},
+            200: {"description": "Viewer HTML page embedding noVNC", "content": {"text/html": {}}},
             401: UNAUTHORIZED_RESPONSE,
-            404: {"description": "`NOT_FOUND`: VNC is disabled"},
+            404: {"description": "`NOT_FOUND`: VNC is disabled (`ENABLE_VNC=false`)"},
         },
     )
     def vnc(request: Request) -> Response:

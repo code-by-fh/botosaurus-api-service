@@ -150,6 +150,7 @@ def install_openapi(app: FastAPI) -> None:
                 title=app.title, version=app.version, routes=app.routes, description=app.description
             )
             _drop_default_validation_responses(schema)
+            _configure_security_schemes(schema)
             app.openapi_schema = schema
         return app.openapi_schema
 
@@ -163,3 +164,27 @@ def _drop_default_validation_responses(schema: dict[str, Any]) -> None:
     components = schema.get("components", {}).get("schemas", {})
     for name in ("HTTPValidationError", "ValidationError"):
         components.pop(name, None)
+
+
+def _configure_security_schemes(schema: dict[str, Any]) -> None:
+    components = schema.setdefault("components", {})
+    components["securitySchemes"] = {
+        "HTTPBearer": {
+            "type": "http",
+            "scheme": "bearer",
+            "description": "API Key passed as Bearer token in the Authorization header.",
+        },
+        "HTTPBasic": {
+            "type": "http",
+            "scheme": "basic",
+            "description": "HTTP Basic Authentication for VNC viewer (username optional, password = API key).",
+        },
+    }
+
+    paths = schema.get("paths", {})
+    for path, methods in paths.items():
+        for method, operation in methods.items():
+            if path == "/vnc":
+                operation["security"] = [{"HTTPBasic": []}]
+            elif path in ("/api/v1/render", "/health/detail"):
+                operation["security"] = [{"HTTPBearer": []}]
