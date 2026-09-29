@@ -72,9 +72,7 @@ async def _render(body: RenderRequest, runtime: Runtime) -> Response:
         "X-Final-Url": quote(result.final_url, safe=URL_SAFE_CHARACTERS),
         "X-Upstream-Status": str(result.upstream_status),
     }
-    return Response(
-        content=output.content, media_type=output.media_type, headers=headers
-    )
+    return Response(content=output.content, media_type=output.media_type, headers=headers)
 
 
 def _health_router(settings: Settings) -> APIRouter:
@@ -159,9 +157,7 @@ def create_app(
         yield
         await application.state.runtime.close()
 
-    application = FastAPI(
-        title="render-api-service", version=SERVICE_VERSION, lifespan=lifespan
-    )
+    application = FastAPI(title="render-api-service", version=SERVICE_VERSION, lifespan=lifespan)
     install_error_handling(application)
     install_openapi(application)
     for router in (
