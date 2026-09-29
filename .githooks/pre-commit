@@ -1,0 +1,24 @@
+#!/bin/sh
+# Git pre-commit hook to automatically format and check code with ruff before committing.
+
+echo "Running pre-commit ruff check and format..."
+
+if command -v ruff >/dev/null 2>&1; then
+    ruff format app tests
+    ruff check app tests
+elif python -m ruff --version >/dev/null 2>&1; then
+    python -m ruff format app tests
+    python -m ruff check app tests
+elif python3 -m ruff --version >/dev/null 2>&1; then
+    python3 -m ruff format app tests
+    python3 -m ruff check app tests
+else
+    echo "Notice: ruff is not installed in local shell path. Skipping pre-commit ruff check."
+    exit 0
+fi
+
+status=$?
+if [ $status -ne 0 ]; then
+    echo "Error: ruff check/format failed. Please fix issues before committing."
+    exit $status
+fi

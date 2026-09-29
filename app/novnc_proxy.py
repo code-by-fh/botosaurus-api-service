@@ -85,9 +85,7 @@ def novnc_proxy_router(prefix: str, vnc_enabled: bool) -> APIRouter:
     return router
 
 
-async def _relay_from_client(
-    ws: WebSocket, upstream: websockets.WebSocketClientProtocol
-) -> None:
+async def _relay_from_client(ws: WebSocket, upstream: websockets.WebSocketClientProtocol) -> None:
     """Relay messages from browser client to upstream noVNC server."""
     try:
         while True:
@@ -102,9 +100,7 @@ async def _relay_from_client(
         pass
 
 
-async def _relay_from_upstream(
-    ws: WebSocket, upstream: websockets.WebSocketClientProtocol
-) -> None:
+async def _relay_from_upstream(ws: WebSocket, upstream: websockets.WebSocketClientProtocol) -> None:
     """Relay messages from upstream noVNC server to browser client."""
     try:
         async for msg in upstream:
