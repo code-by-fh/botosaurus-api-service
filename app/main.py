@@ -125,9 +125,11 @@ def _vnc_router(settings: Settings) -> APIRouter:
         "/vnc",
         summary="noVNC live view of headed Chrome instances",
         description=(
-            "Serves an HTML page embedding the noVNC viewer in an iframe. Requires ENABLE_VNC=true. "
-            "Protected by HTTP Basic Auth (use any username, password = API key). When NOVNC_PREFIX is "
-            "set (e.g. /novnc), static files and WebSocket traffic are proxied through FastAPI on port 8000."
+            "Serves an HTML page embedding the noVNC viewer in an iframe. "
+            "Requires ENABLE_VNC=true. Protected by HTTP Basic Auth (use any "
+            "username, password = API key). When NOVNC_PREFIX is set (e.g. "
+            "/novnc), static files and WebSocket traffic are proxied through "
+            "FastAPI on port 8000."
         ),
         response_class=Response,
         responses={

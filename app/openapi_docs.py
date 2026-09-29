@@ -177,13 +177,13 @@ def _configure_security_schemes(schema: dict[str, Any]) -> None:
         "HTTPBasic": {
             "type": "http",
             "scheme": "basic",
-            "description": "HTTP Basic Authentication for VNC viewer (username optional, password = API key).",
+            "description": "HTTP Basic Auth for VNC viewer (username optional, password = API key).",
         },
     }
 
     paths = schema.get("paths", {})
     for path, methods in paths.items():
-        for method, operation in methods.items():
+        for operation in methods.values():
             if path == "/vnc":
                 operation["security"] = [{"HTTPBasic": []}]
             elif path in ("/api/v1/render", "/health/detail"):
