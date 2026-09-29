@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse
 
 import app.logging_config  # noqa: F401 -- configures logging on import
 from app.api_models import RenderRequest
@@ -125,15 +126,17 @@ def _vnc_router(settings: Settings) -> APIRouter:
         "/vnc",
         summary="noVNC live view of headed Chrome instances",
         description=(
-            "Serves an HTML page embedding the noVNC viewer in an iframe. "
-            "Requires ENABLE_VNC=true. Protected by HTTP Basic Auth (use any "
-            "username, password = API key). When NOVNC_PREFIX is set (e.g. "
-            "/novnc), static files and WebSocket traffic are proxied through "
-            "FastAPI on port 8000."
+            "Serves an HTML page embedding the noVNC viewer in an iframe, or "
+            "redirects to the reverse-proxied noVNC viewer if NOVNC_PREFIX is "
+            "set. Requires ENABLE_VNC=true. Protected by HTTP Basic Auth (use "
+            "any username, password = API key)."
         ),
         response_class=Response,
         responses={
             200: {"description": "Viewer HTML page embedding noVNC", "content": {"text/html": {}}},
+            307: {
+                "description": "Redirects to reverse-proxied noVNC viewer when NOVNC_PREFIX is set"
+            },
             401: UNAUTHORIZED_RESPONSE,
             404: {"description": "`NOT_FOUND`: VNC is disabled (`ENABLE_VNC=false`)"},
         },
@@ -141,6 +144,12 @@ def _vnc_router(settings: Settings) -> APIRouter:
     def vnc(request: Request) -> Response:
         if not settings.vnc_enabled:
             raise HTTPException(status_code=404, detail="VNC is disabled")
+        novnc_prefix = os.environ.get("NOVNC_PREFIX", "").strip()
+        if novnc_prefix:
+            clean_prefix = "/" + novnc_prefix.strip("/")
+            ws_path = clean_prefix.lstrip("/") + "/websockify"
+            target_url = f"{clean_prefix}/vnc.html?autoconnect=true&resize=scale&path={ws_path}"
+            return RedirectResponse(url=target_url, status_code=307)
         host = request.url.hostname or "localhost"
         scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
         return Response(content=vnc_page(host, scheme), media_type="text/html")

@@ -183,6 +183,15 @@ def test_vnc_page_embeds_viewer_when_enabled():
     assert "vnc.html?autoconnect=true" in response.text
 
 
+def test_vnc_redirects_when_novnc_prefix_set():
+    with build_client(ENABLE_VNC="true", NOVNC_PREFIX="/novnc") as client:
+        response = client.get("/vnc", auth=("any", TEST_API_KEY), follow_redirects=False)
+
+    assert response.status_code == 307
+    expected = "/novnc/vnc.html?autoconnect=true&resize=scale&path=novnc/websockify"
+    assert response.headers["location"] == expected
+
+
 def test_idle_timeout_requires_wait_for(client):
     response = client.post(RENDER_PATH, json={"url": TARGET_URL, "idle_timeout": 5}, headers=AUTH)
 
