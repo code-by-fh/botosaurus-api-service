@@ -1,49 +1,46 @@
-FROM nikolaik/python-nodejs:python3.12-nodejs18-slim
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim-trixie@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 
-# System dependencies: Chrome, Xvfb, VNC, download tools
+ARG DEBIAN_FRONTEND=noninteractive
+ARG APP_UID=10001
+
+# Virtual display + optional VNC debug view, and fonts so that the font
+# fingerprint looks like a desktop rather than a bare server.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    gnupg2 \
-    ca-certificates \
-    apt-transport-https \
-    xvfb \
-    x11vnc \
-    openbox \
-    xdotool \
-    x11-utils \
-    xdg-utils \
-    lsof \
-    git \
+      ca-certificates curl gnupg tini \
+      xvfb openbox x11vnc novnc websockify \
+      fonts-liberation fonts-dejavu-core fonts-noto-color-emoji fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
-# Google Chrome stable
-RUN wget -qO- https://dl.google.com/linux/linux_signing_key.pub \
+# Real Google Chrome, not Debian's Chromium: Chromium lacks proprietary codecs,
+# which contradicts a "Chrome" user agent.
+RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
       | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] \
-       http://dl.google.com/linux/chrome/deb/ stable main" \
-       > /etc/apt/sources.list.d/google-chrome.list \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+      > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update && apt-get install -y --no-install-recommends google-chrome-stable \
+    && apt-get purge -y gnupg && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# noVNC (web VNC client)
-RUN git clone --depth 1 --branch v1.4.0 \
-    https://github.com/novnc/noVNC /opt/novnc \
-    && git clone --depth 1 \
-    https://github.com/novnc/websockify /opt/novnc/utils/websockify \
-    && ln -s /opt/novnc/utils/websockify/run /opt/novnc/utils/launch.sh
+RUN useradd --create-home --uid "${APP_UID}" --shell /usr/sbin/nologin app
 
 WORKDIR /app
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/entrypoint
+COPY --chmod=0755 docker/chrome-launcher.sh /usr/local/bin/chrome-launcher
 
-ENV DISPLAY=:99
-ENV CHROME_BIN=/usr/bin/google-chrome
+ENV DISPLAY=:99 \
+    CHROME_BIN=/usr/local/bin/chrome-launcher \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
+USER app
 EXPOSE 8000 6080
 
-ENTRYPOINT ["/entrypoint.sh"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint"]

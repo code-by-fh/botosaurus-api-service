@@ -2,11 +2,13 @@
 
 Log level is controlled via the ``LOG_LEVEL`` environment variable.
 Defaults to ``INFO`` in production; set to ``DEBUG`` for local development.
+Timestamps are always UTC in ISO 8601, independent of the container timezone.
 """
 
 import logging
 import os
 import sys
+import time
 
 
 def setup_logging() -> None:
@@ -21,8 +23,9 @@ def setup_logging() -> None:
 
     formatter = logging.Formatter(
         fmt="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        datefmt="%Y-%m-%dT%H:%M:%SZ",
     )
+    formatter.converter = time.gmtime
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)

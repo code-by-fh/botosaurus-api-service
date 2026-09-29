@@ -1,189 +1,162 @@
+"""FastAPI application: routes, lifecycle and response mapping.
+
+Start with ``uvicorn --factory app.main:create_app``.
+"""
+
+import asyncio
 import logging
-import os
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Literal
+from urllib.parse import quote
 
-from bs4 import BeautifulSoup
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from markdownify import markdownify
-from pydantic import AliasChoices, BaseModel, Field, HttpUrl
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 
-
-import app.logging_config  # noqa: F401 — triggers logging setup on import
-from app.auth import verify_api_key, verify_basic_auth
-from app.browser_pool import BrowserPool
-from app.renderer import render, NavigationError, RenderTimeoutError
+import app.logging_config  # noqa: F401 -- configures logging on import
+from app.api_models import RenderRequest
+from app.auth import basic_guard, bearer_guard
+from app.config import Settings, load_settings
+from app.content.output import OutputSpec, build_output
+from app.errors import install_error_handling
+from app.openapi_docs import (
+    TRACE_REQUEST_PARAMETER,
+    UNAUTHORIZED_RESPONSE,
+    install_openapi,
+    render_responses,
+)
+from app.runtime import Runtime, start_runtime
+from app.scraping.scraper import ScrapeRequest
+from app.vnc import vnc_page
 
 log = logging.getLogger("botosaurus.api")
 
-_pool: BrowserPool | None = None
+SERVICE_VERSION = "2.0.0"
+API_PREFIX = "/api/v1"
+URL_SAFE_CHARACTERS = ":/?#[]@!$&'()*+,;=%~"
+
+RuntimeStarter = Callable[[Settings], Awaitable[Runtime]]
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "on")
+def _runtime(request: Request) -> Runtime:
+    return request.app.state.runtime
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _pool
-    proxy_url = os.environ.get("HOME_PROXY") or os.environ.get("PROXY")
-    block_images_and_css = _env_bool("BLOCK_IMAGES_AND_CSS", True)
-    wait_for_complete_page_load = _env_bool("WAIT_FOR_COMPLETE_PAGE_LOAD", False)
-    log.info(
-        "Starting up botosaurus-api-service (proxy=%s, block_images_and_css=%s, wait_for_complete_page_load=%s)",
-        proxy_url, block_images_and_css, wait_for_complete_page_load,
+def _to_scrape_request(body: RenderRequest) -> ScrapeRequest:
+    return ScrapeRequest(
+        url=str(body.url),
+        mode=body.mode,
+        wait_for=body.wait_for,
+        selector=body.selector,
+        timeout_seconds=float(body.timeout),
+        use_proxy=body.use_proxy,
+        block_resources=body.block_resources,
+        idle_timeout_seconds=float(body.idle_timeout) if body.idle_timeout else None,
     )
-    _pool = BrowserPool(
-        size=int(os.environ.get("MAX_WORKERS", "3")),
-        headless=_env_bool("HEADLESS", False),
-        proxy=proxy_url,
-        block_images_and_css=block_images_and_css,
-        wait_for_complete_page_load=wait_for_complete_page_load,
+
+
+async def _render(body: RenderRequest, runtime: Runtime) -> Response:
+    started = time.monotonic()
+    result = await runtime.scraper.scrape(_to_scrape_request(body))
+    output = await asyncio.to_thread(
+        build_output, result.html, OutputSpec(body.selector, body.format)
     )
-    yield
-    log.info("Shutting down botosaurus-api-service")
-    _pool.shutdown()
-
-
-app = FastAPI(lifespan=lifespan)
-
-
-class RenderRequest(BaseModel):
-    url: HttpUrl
-    wait_for: str | None = None
-    selector: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("selector", "element", "target"),
-        description="Optional CSS selector of DOM element to extract and return",
-    )
-    timeout: int = 30
-    format: Literal["html", "markdown"] = "html"
-    use_proxy: bool = False
-
-
-def _verify_proxy_config(use_proxy: bool) -> None:
-    """Verify proxy configuration if use_proxy is requested."""
-    if use_proxy and not (_pool and _pool.has_proxy):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "proxy_not_configured",
-                "detail": "use_proxy is true, but HOME_PROXY environment variable is not set",
-            },
-        )
-
-
-def _process_dom_content(
-    html: str,
-    selector: str | None,
-    output_format: Literal["html", "markdown"],
-) -> tuple[str, str]:
-    """Extract targeted DOM element or convert HTML to Markdown.
-
-    Returns a tuple of (content, media_type).
-    """
-    soup = BeautifulSoup(html, "html.parser")
-
-    if selector:
-        matched = soup.select_one(selector)
-        if not matched:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "error": "element_not_found",
-                    "detail": f"Element matching selector '{selector}' was not found",
-                },
-            )
-        target_html = str(matched)
-    elif output_format == "markdown":
-        target_html = str(soup.body) if soup.body else html
-    else:
-        target_html = html
-
-    if output_format == "markdown":
-        md = markdownify(
-            target_html, heading_style="ATX", strip=["img", "script", "style"]
-        ).strip()
-        return md, "text/markdown; charset=utf-8"
-
-    return target_html, "text/html"
-
-
-@app.post("/render", dependencies=[Depends(verify_api_key)])
-def render_url(req: RenderRequest) -> Response:
-    log.debug(
-        "POST /render url=%s format=%s selector=%s wait_for=%s timeout=%d use_proxy=%s",
-        req.url, req.format, req.selector, req.wait_for, req.timeout, req.use_proxy,
-    )
-    _verify_proxy_config(req.use_proxy)
-
-    driver = _pool.acquire()
-    if driver is None:
-        raise HTTPException(status_code=503, detail={"error": "pool_exhausted"})
-
-    t0 = time.monotonic()
-    try:
-        raw_html = render(driver, str(req.url), req.wait_for, req.timeout)
-        content, media_type = _process_dom_content(raw_html, req.selector, req.format)
-
-        elapsed = time.monotonic() - t0
-        log.info("Rendered %s as %s in %.2fs", req.url, req.format, elapsed)
-        return Response(content=content, media_type=media_type)
-    except NavigationError as exc:
-        log.error("Navigation failed for %s: %s", req.url, exc)
-        raise HTTPException(status_code=502, detail={"error": "navigation_failed", "detail": str(exc)})
-    except RenderTimeoutError as exc:
-        log.error("Render timeout for %s: %s", req.url, exc)
-        raise HTTPException(status_code=504, detail={"error": "timeout", "detail": str(exc)})
-    finally:
-        _pool.release(driver)
-
-
-def _vnc_page(host: str = "localhost", scheme: str = "http") -> str:
-    prefix = os.environ.get("NOVNC_PREFIX", "").strip()
-    if prefix:
-        clean_prefix = "/" + prefix.strip("/")
-        ws_path = clean_prefix.lstrip("/") + "/websockify"
-        src = f"{clean_prefix}/vnc.html?autoconnect=true&resize=scale&path={ws_path}"
-    else:
-        vnc_port = os.environ.get("VNC_PORT", "6080")
-        src = f"{scheme}://{host}:{vnc_port}/vnc.html?autoconnect=true&resize=scale&path=websockify"
-
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-  <title>Browser View — noVNC</title>
-  <style>
-    body, html {{ margin: 0; padding: 0; height: 100%; background: #1a1a1a; }}
-    iframe {{ width: 100%; height: 100%; border: none; display: block; }}
-  </style>
-</head>
-<body>
-  <iframe src="{src}"></iframe>
-</body>
-</html>"""
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-@app.get("/health/detail", dependencies=[Depends(verify_api_key)])
-def health_detail():
-    return {
-        "status": "ok",
-        "workers_busy": _pool.busy,
-        "workers_total": _pool.total,
+    log.info("Rendered %s via %s in %.2fs", body.url, result.engine, time.monotonic() - started)
+    headers = {
+        "X-Render-Engine": result.engine,
+        "X-Render-Stable": str(result.stable).lower(),
+        "X-Final-Url": quote(result.final_url, safe=URL_SAFE_CHARACTERS),
+        "X-Upstream-Status": str(result.upstream_status),
     }
+    return Response(content=output.content, media_type=output.media_type, headers=headers)
 
 
-@app.get("/vnc", dependencies=[Depends(verify_basic_auth)])
-def vnc(request: Request):
-    host = request.url.hostname or "localhost"
-    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    return Response(content=_vnc_page(host=host, scheme=scheme), media_type="text/html")
+def _health_router(settings: Settings) -> APIRouter:
+    router = APIRouter()
+
+    @router.get("/health", summary="Liveness probe (no authentication)")
+    def health() -> dict:
+        return {"status": "ok"}
+
+    @router.get(
+        "/health/detail",
+        summary="Pool utilisation and learned HTTP verdicts",
+        dependencies=[Depends(bearer_guard(settings.api_keys))],
+        responses={401: UNAUTHORIZED_RESPONSE},
+    )
+    def health_detail(request: Request) -> dict:
+        runtime = _runtime(request)
+        return {
+            "status": "ok",
+            "version": SERVICE_VERSION,
+            "pool": vars(runtime.pool.stats()),
+            "verdicts": runtime.verdicts.counts(),
+        }
+
+    return router
+
+
+def _render_router(settings: Settings) -> APIRouter:
+    router = APIRouter(dependencies=[Depends(bearer_guard(settings.api_keys))])
+
+    @router.post(
+        f"{API_PREFIX}/render",
+        summary="Render a URL and return HTML or Markdown",
+        response_class=Response,
+        responses=render_responses(),
+        openapi_extra=TRACE_REQUEST_PARAMETER,
+    )
+    async def render(body: RenderRequest, request: Request) -> Response:
+        return await _render(body, _runtime(request))
+
+    return router
+
+
+def _vnc_router(settings: Settings) -> APIRouter:
+    router = APIRouter(dependencies=[Depends(basic_guard(settings.api_keys))])
+
+    @router.get(
+        "/vnc",
+        summary="Live view of the headed browsers (requires ENABLE_VNC)",
+        response_class=Response,
+        responses={
+            200: {"description": "Viewer page", "content": {"text/html": {}}},
+            401: UNAUTHORIZED_RESPONSE,
+            404: {"description": "`NOT_FOUND`: VNC is disabled"},
+        },
+    )
+    def vnc(request: Request) -> Response:
+        if not settings.vnc_enabled:
+            raise HTTPException(status_code=404, detail="VNC is disabled")
+        host = request.url.hostname or "localhost"
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+        return Response(content=vnc_page(host, scheme), media_type="text/html")
+
+    return router
+
+
+def create_app(
+    settings: Settings | None = None, runtime_starter: RuntimeStarter = start_runtime
+) -> FastAPI:
+    """Build the application.
+
+    :param settings: configuration; read from the environment when omitted.
+    :param runtime_starter: creates the components on startup (replaced in tests).
+    :raises ConfigError: if the environment configuration is invalid.
+    """
+    resolved = settings or load_settings()
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        application.state.runtime = await runtime_starter(resolved)
+        log.info("botosaurus-api-service %s ready", SERVICE_VERSION)
+        yield
+        await application.state.runtime.close()
+
+    application = FastAPI(
+        title="botosaurus-api-service", version=SERVICE_VERSION, lifespan=lifespan
+    )
+    install_error_handling(application)
+    install_openapi(application)
+    for router in (_health_router(resolved), _render_router(resolved), _vnc_router(resolved)):
+        application.include_router(router)
+    return application

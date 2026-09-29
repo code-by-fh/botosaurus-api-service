@@ -3,20 +3,30 @@ services:
     build: .
     ports:
       - "8000:8000"
-      - "6081:6080"
+      # noVNC debug view: bound to localhost only, reach it via SSH tunnel or a
+      # reverse proxy. Only active with ENABLE_VNC=true.
+      - "127.0.0.1:6080:6080"
     env_file:
-      - .env
+      - .env        # API_KEYS (required), HOME_PROXY, VNC_PASSWORD, ...
     environment:
-      MAX_WORKERS: "1"
-      DISPLAY: ":99"
-      VNC_PORT: "6081"
-      # HEADLESS=false (default): browsers run headed on the shared :99 display
-      #   and are observable live via noVNC.
-      # HEADLESS=true: Chrome runs in real headless mode (no visible window,
-      #   lower resource use); the noVNC view stays empty.
-      HEADLESS: "false"
-      LOG_LEVEL: "DEBUG"
-      # API_KEY is loaded from .env file (see env_file above).
-      # Generate a strong random key: python -c "import secrets; print(secrets.token_urlsafe(48))"
+      # Defaults only: a value in .env takes precedence. Values fixed here would
+      # override env_file silently.
+      # MAX_WORKERS is sized for a Hetzner CX33 (4 vCPU / 8 GB); use 2 on a CX23.
+      MAX_WORKERS: "${MAX_WORKERS:-3}"
+      HEADLESS: "${HEADLESS:-false}"
+      ENABLE_VNC: "${ENABLE_VNC:-false}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     restart: unless-stopped
-    shm_size: "2gb"
+    read_only: true
+    tmpfs:
+      # Chrome profiles, caches and the X11 socket live here. Chrome runs with
+      # --disable-dev-shm-usage, so /tmp replaces /dev/shm and needs the room.
+      - /tmp:size=1g,mode=1777
+      - /home/app:size=256m,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 6g
+    cpus: "3.5"
+    pids_limit: 2048

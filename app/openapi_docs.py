@@ -1,0 +1,165 @@
+"""OpenAPI descriptions of response headers, error bodies and the trace header.
+
+The render endpoints return raw HTML or Markdown plus diagnostic headers, and
+all errors share one envelope. FastAPI cannot infer either from the code, so
+they are declared here and attached to the routes in ``app.main``.
+"""
+
+from typing import Any
+
+from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
+from pydantic import BaseModel, Field
+
+from app.errors import TRACE_HEADER, ServiceBusyError
+
+
+class FieldError(BaseModel):
+    """One invalid request field."""
+
+    field: str = Field(description="Dotted path of the field, e.g. `timeout`")
+    message: str = Field(description="Why the value was rejected")
+
+
+class ErrorDetail(BaseModel):
+    """Error details."""
+
+    code: str = Field(description="Machine-readable UPPER_SNAKE_CASE code")
+    message: str = Field(description="Human-readable explanation")
+    traceId: str = Field(description=f"Same value as the `{TRACE_HEADER}` response header")
+    fields: list[FieldError] | None = Field(
+        default=None, description="Only for `VALIDATION_ERROR`: one entry per invalid field"
+    )
+
+
+class ErrorResponse(BaseModel):
+    """Envelope of every error response."""
+
+    error: ErrorDetail
+
+
+def _header(description: str, schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"description": description, "schema": schema or {"type": "string"}}
+
+
+TRACE_RESPONSE_HEADER = _header(
+    "Trace id of this request: the caller's `X-Request-ID` if one was sent, otherwise generated."
+)
+
+RENDER_SUCCESS_HEADERS = {
+    "X-Render-Engine": _header(
+        "Engine that produced the content: `http` (verified fast path) or `browser` (Chrome).",
+        {"type": "string", "enum": ["http", "browser"]},
+    ),
+    "X-Render-Stable": _header(
+        "`false` if the content was still changing when it was returned (timeout reached, or "
+        "`wait_for` present on a page that never settled).",
+        {"type": "string", "enum": ["true", "false"]},
+    ),
+    "X-Final-Url": _header("URL after all redirects, percent-encoded."),
+    "X-Upstream-Status": _header(
+        "HTTP status the target returned for the main document (`0` if unknown). Error pages "
+        "such as 404 are still returned as content with status 200.",
+        {"type": "integer"},
+    ),
+    TRACE_HEADER: TRACE_RESPONSE_HEADER,
+}
+
+
+def _error(description: str, extra_headers: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "model": ErrorResponse,
+        "description": description,
+        "headers": {TRACE_HEADER: TRACE_RESPONSE_HEADER, **(extra_headers or {})},
+    }
+
+
+UNAUTHORIZED_RESPONSE = _error(
+    "`UNAUTHORIZED`: missing or unknown API key.",
+    {"WWW-Authenticate": _header("Authentication scheme to use.")},
+)
+
+RENDER_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: _error(
+        "`VALIDATION_ERROR` (with `fields`), `TARGET_NOT_ALLOWED` (non-http(s) URL or a host "
+        "resolving to a private or reserved address) or `PROXY_NOT_CONFIGURED`."
+    ),
+    401: UNAUTHORIZED_RESPONSE,
+    404: _error("`ELEMENT_NOT_FOUND`: `selector` matched nothing in the rendered page."),
+    429: _error(
+        "`SERVICE_BUSY`: wait queue full or no browser/host slot became free in time.",
+        {
+            "Retry-After": _header(
+                "Seconds to wait before retrying "
+                f"(currently {ServiceBusyError.retry_after_seconds}).",
+                {"type": "integer"},
+            )
+        },
+    ),
+    500: _error("`INTERNAL_ERROR`: unexpected failure; the `traceId` is in the service log."),
+    502: _error(
+        "`NAVIGATION_FAILED` (DNS, connection or TLS failure, or a redirect to a forbidden "
+        "address) or `TARGET_BLOCKED` (an anti-bot challenge did not resolve)."
+    ),
+    504: _error(
+        "`TIMEOUT`: `wait_for` never appeared (at `timeout`, or earlier with `idle_timeout`), "
+        "or the browser stopped responding."
+    ),
+}
+
+
+def render_responses() -> dict:
+    """Responses of the render route."""
+    success = {
+        "description": "The rendered page, or the element selected by `selector`.",
+        "headers": RENDER_SUCCESS_HEADERS,
+        "content": {
+            "text/html": {"schema": {"type": "string"}},
+            "text/markdown": {"schema": {"type": "string"}},
+        },
+    }
+    return {200: success, **RENDER_ERROR_RESPONSES}
+
+
+TRACE_REQUEST_PARAMETER = {
+    "parameters": [
+        {
+            "name": TRACE_HEADER,
+            "in": "header",
+            "required": False,
+            "description": (
+                "Optional trace id (at most 64 ASCII characters) echoed in the response and "
+                "the logs, to correlate a call with the service log."
+            ),
+            "schema": {"type": "string", "maxLength": 64},
+        }
+    ]
+}
+
+
+def install_openapi(app: FastAPI) -> None:
+    """Generate the schema without FastAPI's default 422 responses.
+
+    The service answers validation errors with 400 in its own envelope (see
+    ``app.errors``), so the generated 422 entries would be wrong.
+    """
+
+    def openapi() -> dict[str, Any]:
+        if app.openapi_schema is None:
+            schema = get_openapi(
+                title=app.title, version=app.version, routes=app.routes, description=app.description
+            )
+            _drop_default_validation_responses(schema)
+            app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = openapi
+
+
+def _drop_default_validation_responses(schema: dict[str, Any]) -> None:
+    for operations in schema.get("paths", {}).values():
+        for operation in operations.values():
+            operation.get("responses", {}).pop("422", None)
+    components = schema.get("components", {}).get("schemas", {})
+    for name in ("HTTPValidationError", "ValidationError"):
+        components.pop(name, None)

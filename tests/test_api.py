@@ -1,319 +1,218 @@
 import pytest
-from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
-from app.main import app, _env_bool
-import app.main as main_module
-from app.auth import reset_cached_key
-from app.renderer import NavigationError, RenderTimeoutError
 
-TEST_API_KEY = "test-key-for-unit-tests"
-AUTH_HEADER = {"Authorization": f"Bearer {TEST_API_KEY}"}
+from app.main import API_PREFIX, create_app
+from app.runtime import Adapters, start_runtime
+from tests.fakes import (
+    SECOND_API_KEY,
+    SERVER_RENDERED_HTML,
+    TEST_API_KEY,
+    FakeHttpFetcher,
+    FakeLauncher,
+    FakePage,
+    make_settings,
+    public_resolver,
+    stable_probe,
+)
+
+RENDER_PATH = f"{API_PREFIX}/render"
+TARGET_URL = "https://example.com/article"
+AUTH = {"Authorization": f"Bearer {TEST_API_KEY}"}
 
 
-@pytest.mark.parametrize("value,expected", [
-    ("true", True), ("True", True), ("1", True), ("yes", True), ("on", True),
-    ("false", False), ("0", False), ("no", False), ("", False),
-])
-def test_env_bool_parses_truthy_values(value, expected, monkeypatch):
-    monkeypatch.setenv("HEADLESS", value)
-    assert _env_bool("HEADLESS", False) is expected
+def build_client(pages: dict | None = None, **env: str) -> TestClient:
+    adapters = Adapters(
+        launcher=FakeLauncher(pages or {}),
+        fetcher_factory=lambda guard, settings: FakeHttpFetcher(),
+        resolver=public_resolver,
+        pause=lambda: 0.0,
+    )
 
+    async def runtime_starter(settings):
+        return await start_runtime(settings, adapters)
 
-def test_env_bool_returns_default_when_unset(monkeypatch):
-    monkeypatch.delenv("HEADLESS", raising=False)
-    assert _env_bool("HEADLESS", False) is False
-    assert _env_bool("HEADLESS", True) is True
+    return TestClient(create_app(make_settings(MAX_WORKERS="1", **env), runtime_starter))
 
 
 @pytest.fixture
-def mock_pool():
-    pool = MagicMock()
-    pool.acquire.return_value = MagicMock()
-    pool.busy = 1
-    pool.total = 3
-    pool.has_proxy = False
-    return pool
+def client():
+    with build_client() as test_client:
+        yield test_client
 
 
-def test_render_503_when_pool_exhausted(client, mock_pool):
-    c, pool = client
-    pool.acquire.return_value = None
-    resp = c.post("/render", json={"url": "https://example.com"}, headers=AUTH_HEADER)
-    assert resp.status_code == 503
-    assert resp.json()["detail"]["error"] == "pool_exhausted"
+def test_health_is_public(client):
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
 
-def test_render_with_use_proxy_raises_400_if_proxy_not_set(client, mock_pool, monkeypatch):
-    mock_pool.has_proxy = False
-    c, _ = client
-    resp = c.post(
-        "/render",
-        json={"url": "https://example.com", "use_proxy": True},
-        headers=AUTH_HEADER,
+def test_health_detail_requires_api_key(client):
+    response = client.get("/health/detail")
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_health_detail_reports_pool(client):
+    response = client.get("/health/detail", headers=AUTH)
+
+    assert response.json()["pool"]["total"] == 1
+
+
+def test_render_returns_html_with_engine_headers(client):
+    response = client.post(RENDER_PATH, json={"url": TARGET_URL}, headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.text == SERVER_RENDERED_HTML
+    assert response.headers["x-render-engine"] == "browser"
+    assert response.headers["x-render-stable"] == "true"
+    assert response.headers["x-final-url"] == TARGET_URL
+    assert response.headers["x-upstream-status"] == "200"
+
+
+def test_non_ascii_final_url_is_percent_encoded():
+    url = "https://example.com/stra\u00dfe"
+    with build_client() as client:
+        response = client.post(RENDER_PATH, json={"url": url}, headers=AUTH)
+
+    assert response.headers["x-final-url"] == "https://example.com/stra%C3%9Fe"
+
+
+def test_every_configured_api_key_is_accepted(client):
+    headers = {"Authorization": f"Bearer {SECOND_API_KEY}"}
+
+    response = client.post(RENDER_PATH, json={"url": TARGET_URL}, headers=headers)
+
+    assert response.status_code == 200
+
+
+def test_unknown_api_key_is_rejected(client):
+    headers = {"Authorization": "Bearer wrong-key"}
+
+    response = client.post(RENDER_PATH, json={"url": TARGET_URL}, headers=headers)
+
+    assert response.status_code == 401
+
+
+def test_render_markdown_of_selected_element(client):
+    body = {"url": TARGET_URL, "selector": "h1", "format": "markdown"}
+
+    response = client.post(RENDER_PATH, json=body, headers=AUTH)
+
+    assert response.text == "# Headline"
+    assert response.headers["content-type"].startswith("text/markdown")
+
+
+def test_element_alias_is_accepted_for_selector(client):
+    body = {"url": TARGET_URL, "element": "h1", "format": "markdown"}
+
+    response = client.post(RENDER_PATH, json=body, headers=AUTH)
+
+    assert response.text == "# Headline"
+
+
+def test_validation_errors_list_each_field(client):
+    body = {"url": "not a url", "timeout": 999, "selector": "div[[["}
+
+    response = client.post(RENDER_PATH, json=body, headers=AUTH)
+
+    error = response.json()["error"]
+    assert response.status_code == 400
+    assert error["code"] == "VALIDATION_ERROR"
+    assert {field["field"] for field in error["fields"]} == {"url", "timeout", "selector"}
+
+
+def test_unknown_fields_are_rejected(client):
+    response = client.post(RENDER_PATH, json={"url": TARGET_URL, "headless": True}, headers=AUTH)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["fields"][0]["field"] == "headless"
+
+
+def test_errors_carry_the_callers_trace_id(client):
+    headers = {**AUTH, "X-Request-ID": "trace-123"}
+
+    response = client.post(
+        RENDER_PATH, json={"url": TARGET_URL, "use_proxy": True}, headers=headers
     )
-    assert resp.status_code == 400
-    assert resp.json()["detail"]["error"] == "proxy_not_configured"
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "code": "PROXY_NOT_CONFIGURED",
+        "message": "use_proxy is true, but HOME_PROXY is not set",
+        "traceId": "trace-123",
+    }
+    assert response.headers["x-request-id"] == "trace-123"
 
 
-def test_render_with_use_proxy_succeeds_when_proxy_configured(client, mock_pool, monkeypatch):
-    mock_pool.has_proxy = True
-    c, pool = client
-    with patch("app.main.render", return_value="<html>proxied</html>"):
-        resp = c.post(
-            "/render",
-            json={"url": "https://example.com", "use_proxy": True},
-            headers=AUTH_HEADER,
-        )
-    assert resp.status_code == 200
-    assert resp.text == "<html>proxied</html>"
+def test_navigation_failure_maps_to_bad_gateway():
+    pages = {TARGET_URL: FakePage(navigation_error="net::ERR_CONNECTION_REFUSED")}
+    with build_client(pages) as client:
+        response = client.post(RENDER_PATH, json={"url": TARGET_URL}, headers=AUTH)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "NAVIGATION_FAILED"
 
 
-@pytest.fixture
-def client(mock_pool, monkeypatch):
-    monkeypatch.setenv("API_KEY", TEST_API_KEY)
-    reset_cached_key()
-    with patch("app.main.BrowserPool", return_value=mock_pool):
-        with TestClient(app) as c:
-            yield c, mock_pool
-    reset_cached_key()
+def test_unversioned_render_route_no_longer_exists(client):
+    response = client.post("/render", json={"url": TARGET_URL}, headers=AUTH)
+
+    assert response.status_code == 404
 
 
-def test_render_returns_html(client):
-    c, _ = client
-    with patch("app.main.render", return_value="<html>hello</html>"):
-        resp = c.post("/render", json={"url": "https://example.com"}, headers=AUTH_HEADER)
-    assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("text/html")
-    assert resp.text == "<html>hello</html>"
+def test_vnc_is_hidden_when_disabled(client):
+    response = client.get("/vnc", auth=("any", TEST_API_KEY))
+
+    assert response.status_code == 404
 
 
-def test_render_returns_html_when_format_html(client):
-    c, _ = client
-    with patch("app.main.render", return_value="<html><body><h1>Title</h1></body></html>"):
-        resp = c.post(
-            "/render",
-            json={"url": "https://example.com", "format": "html"},
-            headers=AUTH_HEADER,
-        )
-    assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("text/html")
+def test_vnc_requires_basic_auth():
+    with build_client(ENABLE_VNC="true") as client:
+        response = client.get("/vnc")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"].startswith("Basic")
 
 
-def test_render_returns_markdown_when_format_markdown(client):
-    c, _ = client
-    with patch("app.main.render", return_value="<html><head><title>Head Content</title></head><body><h1>Title</h1><p>Hello <b>world</b></p></body></html>"):
-        resp = c.post(
-            "/render",
-            json={"url": "https://example.com", "format": "markdown"},
-            headers=AUTH_HEADER,
-        )
-    assert resp.status_code == 200
-    assert "text/markdown" in resp.headers["content-type"]
-    assert "# Title" in resp.text
-    assert "**world**" in resp.text
-    assert "Head Content" not in resp.text
+def test_vnc_page_embeds_viewer_when_enabled():
+    with build_client(ENABLE_VNC="true") as client:
+        response = client.get("/vnc", auth=("any", TEST_API_KEY))
+
+    assert response.status_code == 200
+    assert "vnc.html?autoconnect=true" in response.text
 
 
-def test_render_extracts_specific_selector_as_html(client):
-    c, _ = client
-    html = "<html><body><header>Nav</header><main id='target'><h1>Article</h1></main></body></html>"
-    with patch("app.main.render", return_value=html):
-        resp = c.post(
-            "/render",
-            json={"url": "https://example.com", "selector": "#target"},
-            headers=AUTH_HEADER,
-        )
-    assert resp.status_code == 200
-    assert resp.text == '<main id="target"><h1>Article</h1></main>'
-    assert "<header>" not in resp.text
+def test_idle_timeout_requires_wait_for(client):
+    response = client.post(RENDER_PATH, json={"url": TARGET_URL, "idle_timeout": 5}, headers=AUTH)
+
+    assert response.status_code == 400
+    assert "idle_timeout requires wait_for" in response.json()["error"]["fields"][0]["message"]
 
 
-def test_render_extracts_specific_selector_as_markdown(client):
-    c, _ = client
-    html = "<html><body><header>Nav</header><main id='target'><h1>Article</h1><p>Text</p></main></body></html>"
-    with patch("app.main.render", return_value=html):
-        resp = c.post(
-            "/render",
-            json={"url": "https://example.com", "element": "#target", "format": "markdown"},
-            headers=AUTH_HEADER,
-        )
-    assert resp.status_code == 200
-    assert "# Article" in resp.text
-    assert "Text" in resp.text
-    assert "Nav" not in resp.text
+def test_idle_timeout_ends_wait_for_early_on_idle_page():
+    missing = {TARGET_URL: FakePage(probes=[stable_probe(found=False)])}
+    body = {"url": TARGET_URL, "wait_for": "#price", "timeout": 60, "idle_timeout": 1}
+    with build_client(missing) as client:
+        response = client.post(RENDER_PATH, json=body, headers=AUTH)
+
+    assert response.status_code == 504
+    assert "stayed idle for 1s" in response.json()["error"]["message"]
 
 
-def test_render_returns_404_when_selector_not_found(client):
-    c, _ = client
-    html = "<html><body><div>Content</div></body></html>"
-    with patch("app.main.render", return_value=html):
-        resp = c.post(
-            "/render",
-            json={"url": "https://example.com", "selector": "#nonexistent"},
-            headers=AUTH_HEADER,
-        )
-    assert resp.status_code == 404
-    assert resp.json()["detail"]["error"] == "element_not_found"
+def test_openapi_documents_render_headers_and_error_envelope(client):
+    schema = client.get("/openapi.json").json()
 
-
-def test_render_rejects_invalid_format(client):
-    c, _ = client
-    resp = c.post(
-        "/render",
-        json={"url": "https://example.com", "format": "pdf"},
-        headers=AUTH_HEADER,
+    responses = schema["paths"][RENDER_PATH]["post"]["responses"]
+    assert set(responses["200"]["headers"]) == {
+        "X-Render-Engine",
+        "X-Render-Stable",
+        "X-Final-Url",
+        "X-Upstream-Status",
+        "X-Request-ID",
+    }
+    assert "Retry-After" in responses["429"]["headers"]
+    assert responses["400"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "ErrorResponse"
     )
-    assert resp.status_code == 422
-
-
-def test_render_401_without_api_key(client):
-    c, _ = client
-    resp = c.post("/render", json={"url": "https://example.com"})
-    assert resp.status_code == 401  # Missing Authorization header
-
-
-def test_render_401_with_wrong_api_key(client):
-    c, _ = client
-    resp = c.post(
-        "/render",
-        json={"url": "https://example.com"},
-        headers={"Authorization": "Bearer wrong-key"},
-    )
-    assert resp.status_code == 401
-
-
-def test_render_503_when_pool_exhausted(client, mock_pool):
-    c, pool = client
-    pool.acquire.return_value = None
-    resp = c.post("/render", json={"url": "https://example.com"}, headers=AUTH_HEADER)
-    assert resp.status_code == 503
-    assert resp.json()["detail"]["error"] == "pool_exhausted"
-
-
-def test_render_with_use_proxy_raises_400_if_proxy_not_set(client, mock_pool, monkeypatch):
-    mock_pool.has_proxy = False
-    c, _ = client
-    resp = c.post(
-        "/render",
-        json={"url": "https://example.com", "use_proxy": True},
-        headers=AUTH_HEADER,
-    )
-    assert resp.status_code == 400
-    assert resp.json()["detail"]["error"] == "proxy_not_configured"
-
-
-def test_render_with_use_proxy_uses_home_proxy(client, mock_pool, monkeypatch):
-    mock_pool.has_proxy = True
-    c, pool = client
-    with patch("app.main.render", return_value="<html>proxied</html>"):
-        resp = c.post(
-            "/render",
-            json={"url": "https://example.com", "use_proxy": True},
-            headers=AUTH_HEADER,
-        )
-    assert resp.status_code == 200
-    assert resp.text == "<html>proxied</html>"
-
-
-def test_render_422_on_missing_url(client):
-    c, _ = client
-    resp = c.post("/render", json={}, headers=AUTH_HEADER)
-    assert resp.status_code == 422
-
-
-def test_render_502_on_navigation_error(client):
-    c, _ = client
-    with patch("app.main.render", side_effect=NavigationError("failed")):
-        resp = c.post("/render", json={"url": "https://example.com"}, headers=AUTH_HEADER)
-    assert resp.status_code == 502
-    assert resp.json()["detail"]["error"] == "navigation_failed"
-
-
-def test_render_504_on_timeout(client):
-    c, _ = client
-    with patch("app.main.render", side_effect=RenderTimeoutError("timed out")):
-        resp = c.post("/render", json={"url": "https://example.com"}, headers=AUTH_HEADER)
-    assert resp.status_code == 504
-    assert resp.json()["detail"]["error"] == "timeout"
-
-
-def test_render_releases_driver_on_error(client, mock_pool):
-    c, pool = client
-    with patch("app.main.render", side_effect=NavigationError("oops")):
-        c.post("/render", json={"url": "https://example.com"}, headers=AUTH_HEADER)
-    pool.release.assert_called_once()
-
-
-def test_health_returns_ok_without_details(client):
-    """Public /health returns only status, no pool info."""
-    c, _ = client
-    resp = c.get("/health")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body == {"status": "ok"}
-    assert "workers_busy" not in body
-    assert "workers_total" not in body
-
-
-def test_health_requires_no_auth(client):
-    """Health endpoint must be accessible without authentication."""
-    c, _ = client
-    resp = c.get("/health")
-    assert resp.status_code == 200
-
-
-def test_health_detail_returns_pool_status(client, mock_pool):
-    c, pool = client
-    pool.busy = 2
-    pool.total = 3
-    resp = c.get("/health/detail", headers=AUTH_HEADER)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "ok"
-    assert body["workers_busy"] == 2
-    assert body["workers_total"] == 3
-
-
-def test_health_detail_requires_auth(client):
-    c, _ = client
-    resp = c.get("/health/detail")
-    assert resp.status_code == 401
-
-
-def test_vnc_returns_html_with_iframe(client, monkeypatch):
-    monkeypatch.setenv("VNC_PORT", "6081")
-    c, _ = client
-    resp = c.get("/vnc", auth=("admin", TEST_API_KEY))
-    assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("text/html")
-    assert "iframe" in resp.text
-    assert "http://testserver:6081" in resp.text
-
-
-def test_vnc_uses_https_scheme_when_forwarded_proto_set(client, monkeypatch):
-    monkeypatch.setenv("VNC_PORT", "6081")
-    c, _ = client
-    resp = c.get("/vnc", auth=("admin", TEST_API_KEY), headers={"x-forwarded-proto": "https"})
-    assert resp.status_code == 200
-    assert 'src="https://testserver:6081' in resp.text
-
-
-def test_vnc_uses_prefix_when_novnc_prefix_set(client, monkeypatch):
-    monkeypatch.setenv("NOVNC_PREFIX", "/novnc")
-    c, _ = client
-    resp = c.get("/vnc", auth=("admin", TEST_API_KEY))
-    assert resp.status_code == 200
-    assert 'src="/novnc/vnc.html?autoconnect=true&resize=scale&path=novnc/websockify"' in resp.text
-
-
-def test_vnc_requires_auth(client):
-    c, _ = client
-    resp = c.get("/vnc")
-    assert resp.status_code == 401
-
-
-def test_vnc_rejects_wrong_password(client):
-    c, _ = client
-    resp = c.get("/vnc", auth=("admin", "wrong-password"))
-    assert resp.status_code == 401
-    assert resp.headers.get("www-authenticate") is not None
+    assert "422" not in responses
