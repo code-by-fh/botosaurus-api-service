@@ -108,6 +108,8 @@ class Scraper:
             request.block_resources,
             request.timeout_seconds,
         )
+        if request.use_proxy:
+            log.info("Request for %s routed via HOME_PROXY", request.url)
         async with self._parts.limiter.slot(request.host):
             http_result = await self._try_http(request)
             if http_result is not None:
@@ -162,7 +164,10 @@ class Scraper:
 
     def _fetch_request(self, request: ScrapeRequest) -> HttpFetchRequest:
         proxy = self._parts.egress.url_for(request.use_proxy)
-        log.debug("HTTP fetch for %s via egress proxy %s", request.url, proxy)
+        if request.use_proxy:
+            log.info("HTTP fetch for %s via HOME_PROXY egress (%s)", request.url, proxy)
+        else:
+            log.debug("HTTP fetch for %s via direct egress (%s)", request.url, proxy)
         return HttpFetchRequest(request.url, request.timeout_seconds, proxy)
 
 

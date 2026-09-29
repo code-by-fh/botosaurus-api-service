@@ -90,7 +90,10 @@ class BrowserSession:
     async def open_tab(self, use_proxy: bool) -> zendriver.Tab:
         """Open ``about:blank`` in a new, empty browser context on the chosen route."""
         proxy = self._egress.url_for(use_proxy)
-        log.debug("Opening tab with proxy=%s (use_proxy=%s)", proxy, use_proxy)
+        if use_proxy:
+            log.info("Opening browser tab via HOME_PROXY (%s)", proxy)
+        else:
+            log.debug("Opening tab with direct egress (%s)", proxy)
         return await self._browser.create_context(
             proxy_server=proxy, proxy_bypass_list=[NO_IMPLICIT_BYPASS]
         )
