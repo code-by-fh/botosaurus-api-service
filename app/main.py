@@ -5,7 +5,6 @@ Start with ``uvicorn --factory app.main:create_app``.
 
 import asyncio
 import logging
-import os
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -144,9 +143,8 @@ def _vnc_router(settings: Settings) -> APIRouter:
     def vnc(request: Request) -> Response:
         if not settings.vnc_enabled:
             raise HTTPException(status_code=404, detail="VNC is disabled")
-        novnc_prefix = os.environ.get("NOVNC_PREFIX", "").strip()
-        if novnc_prefix:
-            clean_prefix = "/" + novnc_prefix.strip("/")
+        if settings.novnc_prefix:
+            clean_prefix = "/" + settings.novnc_prefix.strip("/")
             ws_path = clean_prefix.lstrip("/") + "/websockify"
             target_url = f"{clean_prefix}/vnc.html?autoconnect=true&resize=scale&path={ws_path}"
             return RedirectResponse(url=target_url, status_code=307)
@@ -184,8 +182,7 @@ def create_app(
         _vnc_router(resolved),
     ):
         application.include_router(router)
-    novnc_prefix = os.environ.get("NOVNC_PREFIX", "").strip()
-    if novnc_prefix:
-        log.info("noVNC proxy mounted at %s", novnc_prefix)
-        application.include_router(novnc_proxy_router(novnc_prefix, resolved.vnc_enabled))
+    if resolved.novnc_prefix:
+        log.info("noVNC proxy mounted at %s", resolved.novnc_prefix)
+        application.include_router(novnc_proxy_router(resolved.novnc_prefix, resolved.vnc_enabled))
     return application

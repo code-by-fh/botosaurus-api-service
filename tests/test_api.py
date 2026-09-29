@@ -20,7 +20,9 @@ TARGET_URL = "https://example.com/article"
 AUTH = {"Authorization": f"Bearer {TEST_API_KEY}"}
 
 
-def build_client(pages: dict | None = None, **env: str) -> TestClient:
+def build_client(
+    pages: dict | None = None, follow_redirects: bool = True, **env: str
+) -> TestClient:
     adapters = Adapters(
         launcher=FakeLauncher(pages or {}),
         fetcher_factory=lambda guard, settings: FakeHttpFetcher(),
@@ -31,7 +33,10 @@ def build_client(pages: dict | None = None, **env: str) -> TestClient:
     async def runtime_starter(settings):
         return await start_runtime(settings, adapters)
 
-    return TestClient(create_app(make_settings(MAX_WORKERS="1", **env), runtime_starter))
+    return TestClient(
+        create_app(make_settings(MAX_WORKERS="1", **env), runtime_starter),
+        follow_redirects=follow_redirects,
+    )
 
 
 @pytest.fixture
@@ -184,7 +189,7 @@ def test_vnc_page_embeds_viewer_when_enabled():
 
 
 def test_vnc_redirects_when_novnc_prefix_set():
-    with build_client(ENABLE_VNC="true", NOVNC_PREFIX="/novnc") as client:
+    with build_client(ENABLE_VNC="true", NOVNC_PREFIX="/novnc", follow_redirects=False) as client:
         response = client.get("/vnc", auth=("any", TEST_API_KEY), follow_redirects=False)
 
     assert response.status_code == 307

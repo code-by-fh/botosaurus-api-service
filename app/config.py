@@ -75,6 +75,7 @@ class Settings:
     http_first: HttpFirstSettings
     allow_private_targets: bool
     vnc_enabled: bool
+    novnc_prefix: str | None = None
 
 
 class _EnvReader:
@@ -189,4 +190,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         http_first=_read_http_first(reader),
         allow_private_targets=reader.flag("ALLOW_PRIVATE_TARGETS", False),
         vnc_enabled=reader.flag("ENABLE_VNC", False),
+        novnc_prefix=reader.text("NOVNC_PREFIX"),
     )
