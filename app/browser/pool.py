@@ -16,7 +16,7 @@ from app.browser.worker import BrowserWorker
 from app.config import QueueSettings
 from app.errors import ServiceBusyError
 
-log = logging.getLogger("botosaurus.pool")
+log = logging.getLogger("render.pool")
 
 RECYCLE_RETRY_SECONDS = 5.0
 

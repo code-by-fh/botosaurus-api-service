@@ -19,7 +19,7 @@ from zendriver import cdp
 from app.config import BrowserSettings
 from app.egress import EgressGateway
 
-log = logging.getLogger("botosaurus.browser")
+log = logging.getLogger("render.browser")
 
 WINDOW_SIZE_ARG = "--window-size=1920,1080"
 HEADED_ONLY_ARGS = ("--start-maximized",)
@@ -90,6 +90,7 @@ class BrowserSession:
     async def open_tab(self, use_proxy: bool) -> zendriver.Tab:
         """Open ``about:blank`` in a new, empty browser context on the chosen route."""
         proxy = self._egress.url_for(use_proxy)
+        log.debug("Opening tab with proxy=%s (use_proxy=%s)", proxy, use_proxy)
         return await self._browser.create_context(
             proxy_server=proxy, proxy_bypass_list=[NO_IMPLICIT_BYPASS]
         )
@@ -141,5 +142,11 @@ class SessionFactory:
 
     async def start(self) -> BrowserSession:
         spec = LaunchSpec(self.settings, default_proxy=self._egress.url_for(use_proxy=False))
+        log.debug(
+            "Launching browser: headless=%s sandbox=%s default_proxy=%s",
+            self.settings.headless,
+            self.settings.sandbox,
+            spec.default_proxy,
+        )
         browser = await self._launcher(spec)
         return BrowserSession(browser, self._egress)

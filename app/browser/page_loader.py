@@ -11,7 +11,7 @@ from app.browser.readiness import ReadinessTimings, ReadinessWaiter, WaitTarget
 from app.browser.session import BrowserSession
 from app.errors import NavigationError
 
-log = logging.getLogger("botosaurus.browser")
+log = logging.getLogger("render.browser")
 
 BLOCKED_RESOURCE_PATTERNS = (
     "*.png",

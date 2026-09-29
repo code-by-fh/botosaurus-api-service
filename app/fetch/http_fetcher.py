@@ -16,7 +16,7 @@ from curl_cffi.requests.exceptions import RequestException
 from app.errors import NavigationError
 from app.url_guard import UrlGuard
 
-log = logging.getLogger("botosaurus.http")
+log = logging.getLogger("render.http")
 
 IMPERSONATE_TARGET = "chrome"
 MAX_REDIRECTS = 5

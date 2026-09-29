@@ -28,7 +28,7 @@ from app.runtime import Runtime, start_runtime
 from app.scraping.scraper import ScrapeRequest
 from app.vnc import vnc_page
 
-log = logging.getLogger("botosaurus.api")
+log = logging.getLogger("render.api")
 
 SERVICE_VERSION = "2.0.0"
 API_PREFIX = "/api/v1"
@@ -148,12 +148,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         application.state.runtime = await runtime_starter(resolved)
-        log.info("botosaurus-api-service %s ready", SERVICE_VERSION)
+        log.info("render-api-service %s ready", SERVICE_VERSION)
         yield
         await application.state.runtime.close()
 
     application = FastAPI(
-        title="botosaurus-api-service", version=SERVICE_VERSION, lifespan=lifespan
+        title="render-api-service", version=SERVICE_VERSION, lifespan=lifespan
     )
     install_error_handling(application)
     install_openapi(application)

@@ -14,7 +14,7 @@ from app.browser.page_loader import BrowserJob, BrowserPage, load_page
 from app.browser.session import BrowserSession, SessionFactory
 from app.errors import RenderTimeoutError, ServiceError
 
-log = logging.getLogger("botosaurus.browser")
+log = logging.getLogger("render.browser")
 
 HARD_DEADLINE_GRACE_SECONDS = 10.0
 

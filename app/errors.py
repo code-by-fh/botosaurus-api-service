@@ -13,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-log = logging.getLogger("botosaurus.errors")
+log = logging.getLogger("render.errors")
 
 TRACE_HEADER = "X-Request-ID"
 MAX_TRACE_ID_LENGTH = 64

@@ -21,7 +21,7 @@ from fastapi.security import (
     HTTPBearer,
 )
 
-BASIC_REALM = "botosaurus-vnc"
+BASIC_REALM = "render-vnc"
 
 _bearer_scheme = HTTPBearer(
     scheme_name="Bearer API-Key",

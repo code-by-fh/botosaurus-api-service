@@ -22,7 +22,7 @@ from app.fetch.http_fetcher import HttpFetcher, HttpFetchRequest
 from app.scraping.host_limiter import HostLimiter
 from app.scraping.verdicts import VerdictStore, section_key
 
-log = logging.getLogger("botosaurus.verify")
+log = logging.getLogger("render.verify")
 
 MAX_CONCURRENT_VERIFICATIONS = 4
 PAUSE_RANGE_SECONDS = (1.0, 3.0)

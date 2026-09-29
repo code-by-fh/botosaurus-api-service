@@ -27,7 +27,7 @@ from app.scraping.verdicts import Verdict, VerdictStore, section_key
 from app.scraping.verifier import HttpVerifier, VerificationSample
 from app.url_guard import UrlGuard
 
-log = logging.getLogger("botosaurus.scraper")
+log = logging.getLogger("render.scraper")
 
 HTTP_OK = 200
 
@@ -100,6 +100,14 @@ class Scraper:
         if request.use_proxy and not self._parts.egress.has_proxy:
             raise ProxyNotConfiguredError("use_proxy is true, but HOME_PROXY is not set")
         await self._parts.guard.check(request.url)
+        log.debug(
+            "Scraping %s | mode=%s use_proxy=%s block_resources=%s timeout=%ss",
+            request.url,
+            request.mode,
+            request.use_proxy,
+            request.block_resources,
+            request.timeout_seconds,
+        )
         async with self._parts.limiter.slot(request.host):
             http_result = await self._try_http(request)
             if http_result is not None:
@@ -114,8 +122,11 @@ class Scraper:
     async def _try_http(self, request: ScrapeRequest) -> ScrapeResult | None:
         key = section_key(request.url)
         if not self._http_allowed(request):
+            log.debug("HTTP fast path disabled for %s (mode=%s)", request.url, request.mode)
             return None
-        if self._parts.verdicts.get(key) is not Verdict.HTTP_SUFFICIENT:
+        verdict = self._parts.verdicts.get(key)
+        if verdict is not Verdict.HTTP_SUFFICIENT:
+            log.debug("Section verdict for %s is %s, using browser", request.url, verdict)
             return None
         try:
             page = await self._parts.fetcher.fetch(self._fetch_request(request))
@@ -130,6 +141,7 @@ class Scraper:
             log.info("HTTP result for %s rejected (%s), using browser", request.url, reason)
             self._parts.verdicts.record_mismatch(key)
             return None
+        log.debug("HTTP fast path succeeded for %s", request.url)
         return ScrapeResult(page.html, page.final_url, "http", True, page.status)
 
     def _stays_in_verified_sections(self, final_url: str) -> bool:
@@ -150,6 +162,7 @@ class Scraper:
 
     def _fetch_request(self, request: ScrapeRequest) -> HttpFetchRequest:
         proxy = self._parts.egress.url_for(request.use_proxy)
+        log.debug("HTTP fetch for %s via egress proxy %s", request.url, proxy)
         return HttpFetchRequest(request.url, request.timeout_seconds, proxy)
 
 

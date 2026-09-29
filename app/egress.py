@@ -30,7 +30,7 @@ from zendriver.core.proxy import (
 from app.errors import ServiceError
 from app.url_guard import UrlGuard
 
-log = logging.getLogger("botosaurus.egress")
+log = logging.getLogger("render.egress")
 
 LISTEN_HOST = "127.0.0.1"
 HEADER_LIMIT_BYTES = 65536
@@ -224,7 +224,9 @@ class GuardedProxy:
     async def _tunnel(self, host: str, port: int) -> Streams:
         addresses = await self._vet(host)
         if self._upstream is not None:
+            log.debug("CONNECT %s:%d via upstream proxy %s", host, port, self._upstream.host)
             return await self._upstream.open_tunnel(host, port)
+        log.debug("CONNECT %s:%d directly to %s", host, port, addresses)
         return await _connect_first(addresses, port)
 
     async def _forward_plain(self, request: ProxyRequest) -> Streams:
@@ -269,15 +271,26 @@ class EgressGateway:
         :raises ValueError: if the proxied route is requested but not configured.
         """
         if not use_proxy:
-            return self._direct.url
+            url = self._direct.url
+            log.debug("Egress route: direct (%s)", url)
+            return url
         if self._proxied is None:
             raise ValueError("no proxied egress configured")
-        return self._proxied.url
+        url = self._proxied.url
+        log.debug("Egress route: proxied via HOME_PROXY (%s)", url)
+        return url
 
     async def start(self) -> None:
         await self._direct.start()
         if self._proxied is not None:
             await self._proxied.start()
+            log.info(
+                "Egress gateway started: direct=%s | proxied=%s (HOME_PROXY configured)",
+                self._direct.url,
+                self._proxied.url,
+            )
+        else:
+            log.info("Egress gateway started: direct=%s (no HOME_PROXY)", self._direct.url)
 
     async def close(self) -> None:
         await self._direct.close()
