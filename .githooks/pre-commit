@@ -3,22 +3,31 @@
 
 echo "Running pre-commit ruff check and format..."
 
+RUFF=""
 if command -v ruff >/dev/null 2>&1; then
-    ruff format app tests
-    ruff check app tests
+    RUFF="ruff"
 elif python -m ruff --version >/dev/null 2>&1; then
-    python -m ruff format app tests
-    python -m ruff check app tests
+    RUFF="python -m ruff"
 elif python3 -m ruff --version >/dev/null 2>&1; then
-    python3 -m ruff format app tests
-    python3 -m ruff check app tests
+    RUFF="python3 -m ruff"
 else
-    echo "Notice: ruff is not installed in local shell path. Skipping pre-commit ruff check."
-    exit 0
+    echo "ERROR: ruff is not installed in your Python environment!"
+    echo "Please run: pip install ruff"
+    exit 1
 fi
 
-status=$?
-if [ $status -ne 0 ]; then
-    echo "Error: ruff check/format failed. Please fix issues before committing."
-    exit $status
+# Auto-format python code in app and tests
+$RUFF format app tests
+format_status=$?
+
+# Run ruff check
+$RUFF check app tests
+check_status=$?
+
+if [ $format_status -ne 0 ] || [ $check_status -ne 0 ]; then
+    echo "ERROR: ruff check or format failed. Commit aborted!"
+    exit 1
 fi
+
+# Re-stage formatted files if formatting was applied
+git add app/ tests/
