@@ -1,4 +1,4 @@
-# Project Rules for botosaurus-api-service
+# Project Rules for page-render-service
 
 ## Python Code Formatting & Quality
 1. **Always format Python files before committing**: Whenever modifying Python files in `app/` or `tests/`, ensure imports are sorted (`I001`) and function signatures/formatting match `ruff format` output.

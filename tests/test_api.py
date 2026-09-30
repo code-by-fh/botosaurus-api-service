@@ -1,42 +1,22 @@
-import pytest
-from fastapi.testclient import TestClient
+import logging
 
-from app.main import API_PREFIX, create_app
-from app.runtime import Adapters, start_runtime
+import pytest
+
+from app.api_models import MAX_WAIT_FOR_SETTLE_SECONDS
+from app.main import API_PREFIX
+from app.security_headers import SECURITY_HEADERS
+from tests.app_client import build_client
 from tests.fakes import (
     SECOND_API_KEY,
     SERVER_RENDERED_HTML,
     TEST_API_KEY,
-    FakeHttpFetcher,
-    FakeLauncher,
     FakePage,
-    make_settings,
-    public_resolver,
     stable_probe,
 )
 
 RENDER_PATH = f"{API_PREFIX}/render"
 TARGET_URL = "https://example.com/article"
 AUTH = {"Authorization": f"Bearer {TEST_API_KEY}"}
-
-
-def build_client(
-    pages: dict | None = None, follow_redirects: bool = True, **env: str
-) -> TestClient:
-    adapters = Adapters(
-        launcher=FakeLauncher(pages or {}),
-        fetcher_factory=lambda guard, settings: FakeHttpFetcher(),
-        resolver=public_resolver,
-        pause=lambda: 0.0,
-    )
-
-    async def runtime_starter(settings):
-        return await start_runtime(settings, adapters)
-
-    return TestClient(
-        create_app(make_settings(MAX_WORKERS="1", **env), runtime_starter),
-        follow_redirects=follow_redirects,
-    )
 
 
 @pytest.fixture
@@ -63,6 +43,12 @@ def test_health_detail_reports_pool(client):
     response = client.get("/health/detail", headers=AUTH)
 
     assert response.json()["pool"]["total"] == 1
+
+
+def test_health_detail_reports_clearance_entry_count_only(client):
+    response = client.get("/health/detail", headers=AUTH)
+
+    assert response.json()["clearance"] == {"enabled": True, "entries": 0}
 
 
 def test_render_returns_html_with_engine_headers(client):
@@ -166,37 +152,6 @@ def test_unversioned_render_route_no_longer_exists(client):
     assert response.status_code == 404
 
 
-def test_vnc_is_hidden_when_disabled(client):
-    response = client.get("/vnc", auth=("any", TEST_API_KEY))
-
-    assert response.status_code == 404
-
-
-def test_vnc_requires_basic_auth():
-    with build_client(ENABLE_VNC="true") as client:
-        response = client.get("/vnc")
-
-    assert response.status_code == 401
-    assert response.headers["www-authenticate"].startswith("Basic")
-
-
-def test_vnc_page_embeds_viewer_when_enabled():
-    with build_client(ENABLE_VNC="true") as client:
-        response = client.get("/vnc", auth=("any", TEST_API_KEY))
-
-    assert response.status_code == 200
-    assert "vnc.html?autoconnect=true" in response.text
-
-
-def test_vnc_redirects_when_novnc_prefix_set():
-    with build_client(ENABLE_VNC="true", NOVNC_PREFIX="/novnc", follow_redirects=False) as client:
-        response = client.get("/vnc", auth=("any", TEST_API_KEY), follow_redirects=False)
-
-    assert response.status_code == 307
-    expected = "/novnc/vnc.html?autoconnect=true&resize=scale&path=novnc/websockify"
-    assert response.headers["location"] == expected
-
-
 def test_idle_timeout_requires_wait_for(client):
     response = client.post(RENDER_PATH, json={"url": TARGET_URL, "idle_timeout": 5}, headers=AUTH)
 
@@ -214,8 +169,41 @@ def test_idle_timeout_ends_wait_for_early_on_idle_page():
     assert "stayed idle for 1s" in response.json()["error"]["message"]
 
 
+def test_wait_for_settle_requires_wait_for(client):
+    body = {"url": TARGET_URL, "wait_for_settle": 1}
+
+    response = client.post(RENDER_PATH, json=body, headers=AUTH)
+
+    assert response.status_code == 400
+    assert "wait_for_settle requires wait_for" in response.json()["error"]["fields"][0]["message"]
+
+
+@pytest.mark.parametrize("settle", [-0.5, MAX_WAIT_FOR_SETTLE_SECONDS + 0.5])
+def test_wait_for_settle_outside_range_is_rejected(client, settle):
+    body = {"url": TARGET_URL, "wait_for": "#price", "wait_for_settle": settle}
+
+    response = client.post(RENDER_PATH, json=body, headers=AUTH)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["fields"][0]["field"] == "wait_for_settle"
+
+
+def test_zero_wait_for_settle_returns_page_on_first_usable_poll(caplog):
+    restless = [stable_probe(text_length=length) for length in range(1, 100_000)]
+    pages = {TARGET_URL: FakePage(probes=restless)}
+    body = {"url": TARGET_URL, "wait_for": "#price", "wait_for_settle": 0}
+
+    with build_client(pages) as client, caplog.at_level(logging.INFO, logger="render.api"):
+        response = client.post(RENDER_PATH, json=body, headers=AUTH)
+
+    [line] = timing_lines(caplog)
+    assert response.status_code == 200
+    assert response.headers["x-render-stable"] == "false"
+    assert "readiness_end=wait-for-found" in line
+
+
 def test_openapi_documents_render_headers_and_error_envelope(client):
-    schema = client.get("/openapi.json").json()
+    schema = client.app.openapi()
 
     responses = schema["paths"][RENDER_PATH]["post"]["responses"]
     assert set(responses["200"]["headers"]) == {
@@ -224,9 +212,53 @@ def test_openapi_documents_render_headers_and_error_envelope(client):
         "X-Final-Url",
         "X-Upstream-Status",
         "X-Request-ID",
+        *SECURITY_HEADERS,
     }
     assert "Retry-After" in responses["429"]["headers"]
     assert responses["400"]["content"]["application/json"]["schema"]["$ref"].endswith(
         "ErrorResponse"
     )
     assert "422" not in responses
+
+
+def test_openapi_documents_auth_lockout_on_protected_routes(client):
+    schema = client.app.openapi()
+
+    responses = schema["paths"]["/health/detail"]["get"]["responses"]
+    assert "TOO_MANY_AUTH_FAILURES" in responses["429"]["description"]
+    assert "Retry-After" in responses["429"]["headers"]
+
+
+def timing_lines(caplog) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Render timing ")
+    ]
+
+
+def test_successful_render_logs_one_timing_line_with_trace_id(client, caplog):
+    headers = {**AUTH, "X-Request-ID": "trace-timing"}
+
+    with caplog.at_level(logging.INFO, logger="render.api"):
+        client.post(RENDER_PATH, json={"url": TARGET_URL, "format": "markdown"}, headers=headers)
+
+    [line] = timing_lines(caplog)
+    assert line.startswith(
+        f"Render timing traceId=trace-timing url={TARGET_URL} outcome=ok engine=browser "
+    )
+    for key in ("queue_ms=", "readiness_ms=", "output_ms=", "total_ms=", "readiness_end=settled"):
+        assert key in line
+
+
+def test_failed_render_logs_timing_line_with_error_code(caplog):
+    unreachable = FakePage(navigation_error="net::ERR_NAME_NOT_RESOLVED")
+
+    with build_client(pages={TARGET_URL: unreachable}) as client, caplog.at_level(logging.INFO):
+        response = client.post(RENDER_PATH, json={"url": TARGET_URL}, headers=AUTH)
+
+    [line] = timing_lines(caplog)
+    assert response.status_code == 502
+    assert "outcome=NAVIGATION_FAILED engine=none" in line
+    assert "navigate_ms=" in line
+    assert "readiness_ms=" not in line

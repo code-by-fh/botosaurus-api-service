@@ -15,6 +15,7 @@ from app.browser.page_loader import BrowserJob, BrowserPage
 from app.browser.worker import BrowserWorker
 from app.config import QueueSettings
 from app.errors import ServiceBusyError
+from app.timing import Phase
 
 log = logging.getLogger("render.pool")
 
@@ -56,7 +57,8 @@ class BrowserPool:
 
         :raises ServiceBusyError: if the wait queue is full or no worker became free in time.
         """
-        worker = await self._acquire()
+        with job.timer.phase(Phase.QUEUE):
+            worker = await self._acquire()
         try:
             return await worker.render(job)
         finally:

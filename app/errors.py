@@ -35,6 +35,45 @@ class ServiceError(Exception):
         super().__init__(message)
         self.message = message
 
+    def headers(self) -> dict[str, str]:
+        """Extra response headers this error requires (none by default)."""
+        return {}
+
+
+class AuthenticationError(ServiceError):
+    """Credentials are missing or do not match any configured API key."""
+
+    status_code = 401
+    code = "UNAUTHORIZED"
+
+    def __init__(self, message: str, challenge: str):
+        super().__init__(message)
+        self.challenge = challenge
+
+    def headers(self) -> dict[str, str]:
+        return {"WWW-Authenticate": self.challenge}
+
+
+class TooManyAuthFailuresError(ServiceError):
+    """The client presented wrong credentials too often and is locked out for a while."""
+
+    status_code = 429
+    code = "TOO_MANY_AUTH_FAILURES"
+
+    def __init__(self, retry_after_seconds: int):
+        super().__init__("Too many failed authentication attempts; retry later")
+        self.retry_after_seconds = retry_after_seconds
+
+    def headers(self) -> dict[str, str]:
+        return {"Retry-After": str(self.retry_after_seconds)}
+
+
+class ResourceNotFoundError(ServiceError):
+    """The requested resource does not exist or is not exposed."""
+
+    status_code = 404
+    code = "NOT_FOUND"
+
 
 class TargetNotAllowedError(ServiceError):
     """The requested URL points to a destination the service must not contact."""
@@ -64,6 +103,9 @@ class ServiceBusyError(ServiceError):
     code = "SERVICE_BUSY"
     retry_after_seconds = 5
 
+    def headers(self) -> dict[str, str]:
+        return {"Retry-After": str(self.retry_after_seconds)}
+
 
 class NavigationError(ServiceError):
     """The target could not be loaded (DNS, TLS, connection, HTTP error page)."""
@@ -77,6 +119,13 @@ class TargetBlockedError(ServiceError):
 
     status_code = 502
     code = "TARGET_BLOCKED"
+
+
+class VncUnavailableError(ServiceError):
+    """The in-container noVNC server did not answer the proxied request."""
+
+    status_code = 502
+    code = "VNC_UNAVAILABLE"
 
 
 class RenderTimeoutError(ServiceError):
@@ -96,11 +145,8 @@ def _envelope(code: str, message: str, trace_id: str) -> dict:
 
 
 async def _service_error_handler(request: Request, exc: ServiceError) -> JSONResponse:
-    headers = {}
-    if isinstance(exc, ServiceBusyError):
-        headers["Retry-After"] = str(exc.retry_after_seconds)
     body = _envelope(exc.code, exc.message, trace_id_of(request))
-    return JSONResponse(status_code=exc.status_code, content=body, headers=headers)
+    return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers())
 
 
 def _field_name(location: tuple) -> str:

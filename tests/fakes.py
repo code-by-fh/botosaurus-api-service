@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 from zendriver import cdp
+from zendriver.core.connection import ProtocolException
 
 from app.browser.page_loader import UPSTREAM_STATUS_SCRIPT
 from app.config import Settings, load_settings
@@ -41,6 +42,34 @@ async def public_resolver(host: str) -> list[str]:
     return [PUBLIC_ADDRESS]
 
 
+def cdp_cookie(name: str, domain: str, expires: float | None = None, value: str = "v") -> dict:
+    """A cookie as Chrome reports it in ``Storage.getCookies``; ``None`` expiry = session."""
+    return {
+        "name": name,
+        "value": value,
+        "domain": domain,
+        "path": "/",
+        "size": len(name) + len(value),
+        "httpOnly": False,
+        "secure": True,
+        "session": expires is None,
+        "priority": "Medium",
+        "sourceScheme": "Secure",
+        "sourcePort": 443,
+        "expires": -1 if expires is None else expires,
+        "sameSite": "Lax",
+    }
+
+
+def _cookie_from_param(param: dict) -> dict:
+    # Chrome turns a url-scoped cookie into a host-only cookie of that host.
+    domain = param.get("domain") or param["url"].split("/")[2]
+    cookie = cdp_cookie(param["name"], domain, param.get("expires"), param["value"])
+    cookie.update(path=param.get("path", "/"), secure=param.get("secure", False))
+    cookie.update(httpOnly=param.get("httpOnly", False), sameSite=param.get("sameSite"))
+    return cookie
+
+
 def stable_probe(text_length: int = 500, **changes) -> dict:
     probe = {
         "ready": "complete",
@@ -63,6 +92,7 @@ class FakePage:
     navigation_error: str | None = None
     hangs: bool = False
     status: int = 200
+    sets_cookies: list[dict] = field(default_factory=list)
 
     def probe_at(self, index: int) -> dict:
         return self.probes[min(index, len(self.probes) - 1)]
@@ -73,6 +103,7 @@ class FakeTab:
 
     def __init__(self, browser: "FakeBrowser", context_id: str):
         self._browser = browser
+        self.context_id = context_id
         self.target = SimpleNamespace(browser_context_id=cdp.browser.BrowserContextID(context_id))
         self.url = "about:blank"
         self._probe_count = 0
@@ -91,7 +122,9 @@ class FakeTab:
         if request["method"] != "Page.navigate":
             return {}
         self.url = request["params"]["url"]
-        error = self._browser.page_for(self.url).navigation_error
+        page = self._browser.page_for(self.url)
+        self._browser.cookie_jar(self.context_id).extend(page.sets_cookies)
+        error = page.navigation_error
         return {"frameId": "frame-1", "errorText": error} if error else {"frameId": "frame-1"}
 
     async def evaluate(self, expression: str):
@@ -122,10 +155,23 @@ class FakeConnection:
         self._browser.sent_methods.append(request["method"])
         if request["method"] == "Target.disposeBrowserContext" and self._browser.fail_dispose:
             raise ConnectionError("websocket closed")
+        response = self._respond(request)
         try:
-            command.send({})
+            command.send(response)
         except StopIteration as done:
             return done.value
+
+    def _respond(self, request: dict) -> dict:
+        if not request["method"].startswith("Storage."):
+            return {}
+        if self._browser.fail_storage:
+            raise ProtocolException({"code": -32000, "message": "Storage failed"})
+        jar = self._browser.cookie_jar(request["params"]["browserContextId"])
+        if request["method"] == "Storage.getCookies":
+            return {"cookies": list(jar)}
+        self._browser.injected.append(request["params"]["cookies"])
+        jar.extend(_cookie_from_param(param) for param in request["params"]["cookies"])
+        return {}
 
 
 class FakeBrowser:
@@ -140,7 +186,14 @@ class FakeBrowser:
         self.closed_tabs = 0
         self.fail_dispose = False
         self.fail_stop = False
+        self.fail_storage = False
         self.stopped = False
+        self.cookie_jars: dict[str, list[dict]] = {}
+        self.injected: list[list[dict]] = []
+
+    def cookie_jar(self, context_id: str) -> list[dict]:
+        """The cookies of one browser context, like Chrome keeps them apart."""
+        return self.cookie_jars.setdefault(context_id, [])
 
     def page_for(self, url: str) -> FakePage:
         return self._pages.get(url, FakePage())

@@ -6,7 +6,8 @@ set -euo pipefail
 DISPLAY_NUMBER=99
 SCREEN_GEOMETRY=1920x1080x24
 VNC_RFB_PORT=5900
-NOVNC_PORT=6080
+# websockify listens on loopback only; the API relays it under /vnc.
+NOVNC_PORT="${VNC_PORT:-6080}"
 NOVNC_WEB_ROOT=/usr/share/novnc
 DISPLAY_WAIT_ATTEMPTS=50
 
@@ -34,10 +35,10 @@ start_vnc() {
   local password_file
   password_file="$(mktemp)"
   x11vnc -storepasswd "$VNC_PASSWORD" "$password_file" >/dev/null
-  echo "[entrypoint] Starting x11vnc and noVNC on :${NOVNC_PORT}"
+  echo "[entrypoint] Starting x11vnc and noVNC on 127.0.0.1:${NOVNC_PORT} (served via /vnc)"
   x11vnc -display ":${DISPLAY_NUMBER}" -forever -shared -localhost -quiet \
     -rfbauth "$password_file" -rfbport "$VNC_RFB_PORT" &
-  websockify --web "$NOVNC_WEB_ROOT" "$NOVNC_PORT" "127.0.0.1:${VNC_RFB_PORT}" &
+  websockify --web "$NOVNC_WEB_ROOT" "127.0.0.1:${NOVNC_PORT}" "127.0.0.1:${VNC_RFB_PORT}" &
 }
 
 if ! is_true "${HEADLESS:-false}"; then

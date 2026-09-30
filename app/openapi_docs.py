@@ -11,7 +11,10 @@ from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
 
+from app.auth_throttle import AUTH_FAILURE_WINDOW_SECONDS, MAX_AUTH_FAILURES
 from app.errors import TRACE_HEADER, ServiceBusyError
+from app.security_headers import SECURITY_HEADERS
+from app.vnc_session import SESSION_COOKIE_NAME
 
 
 class FieldError(BaseModel):
@@ -46,6 +49,11 @@ TRACE_RESPONSE_HEADER = _header(
     "Trace id of this request: the caller's `X-Request-ID` if one was sent, otherwise generated."
 )
 
+SECURITY_RESPONSE_HEADERS = {
+    name: _header(f"Always `{value}`; set on every response.")
+    for name, value in SECURITY_HEADERS.items()
+}
+
 RENDER_SUCCESS_HEADERS = {
     "X-Render-Engine": _header(
         "Engine that produced the content: `http` (verified fast path) or `browser` (Chrome).",
@@ -53,7 +61,7 @@ RENDER_SUCCESS_HEADERS = {
     ),
     "X-Render-Stable": _header(
         "`false` if the content was still changing when it was returned (timeout reached, or "
-        "`wait_for` present on a page that never settled).",
+        "`wait_for` present for `wait_for_settle` seconds on a page that never settled).",
         {"type": "string", "enum": ["true", "false"]},
     ),
     "X-Final-Url": _header("URL after all redirects, percent-encoded."),
@@ -63,6 +71,7 @@ RENDER_SUCCESS_HEADERS = {
         {"type": "integer"},
     ),
     TRACE_HEADER: TRACE_RESPONSE_HEADER,
+    **SECURITY_RESPONSE_HEADERS,
 }
 
 
@@ -70,14 +79,32 @@ def _error(description: str, extra_headers: dict[str, Any] | None = None) -> dic
     return {
         "model": ErrorResponse,
         "description": description,
-        "headers": {TRACE_HEADER: TRACE_RESPONSE_HEADER, **(extra_headers or {})},
+        "headers": {
+            TRACE_HEADER: TRACE_RESPONSE_HEADER,
+            **SECURITY_RESPONSE_HEADERS,
+            **(extra_headers or {}),
+        },
     }
+
+
+def _retry_after(description: str) -> dict[str, Any]:
+    return {"Retry-After": _header(description, {"type": "integer"})}
 
 
 UNAUTHORIZED_RESPONSE = _error(
     "`UNAUTHORIZED`: missing or unknown API key.",
     {"WWW-Authenticate": _header("Authentication scheme to use.")},
 )
+
+AUTH_THROTTLED_DESCRIPTION = (
+    f"`TOO_MANY_AUTH_FAILURES`: {MAX_AUTH_FAILURES} wrong API keys from this client within "
+    f"{AUTH_FAILURE_WINDOW_SECONDS // 60} minutes; every request is refused until `Retry-After`."
+)
+
+AUTH_RESPONSES: dict[int | str, dict[str, Any]] = {
+    401: UNAUTHORIZED_RESPONSE,
+    429: _error(AUTH_THROTTLED_DESCRIPTION, _retry_after("Seconds until the lockout ends.")),
+}
 
 RENDER_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: _error(
@@ -87,14 +114,13 @@ RENDER_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     401: UNAUTHORIZED_RESPONSE,
     404: _error("`ELEMENT_NOT_FOUND`: `selector` matched nothing in the rendered page."),
     429: _error(
-        "`SERVICE_BUSY`: wait queue full or no browser/host slot became free in time.",
-        {
-            "Retry-After": _header(
-                "Seconds to wait before retrying "
-                f"(currently {ServiceBusyError.retry_after_seconds}).",
-                {"type": "integer"},
-            )
-        },
+        "`SERVICE_BUSY`: wait queue full or no browser/host slot became free in time. "
+        f"Or {AUTH_THROTTLED_DESCRIPTION}",
+        _retry_after(
+            "Seconds to wait before retrying (`SERVICE_BUSY`: currently "
+            f"{ServiceBusyError.retry_after_seconds}; `TOO_MANY_AUTH_FAILURES`: until the lockout "
+            "ends)."
+        ),
     ),
     500: _error("`INTERNAL_ERROR`: unexpected failure; the `traceId` is in the service log."),
     502: _error(
@@ -121,6 +147,38 @@ def render_responses() -> dict:
     return {200: success, **RENDER_ERROR_RESPONSES}
 
 
+def vnc_page_responses() -> dict:
+    """Responses of ``GET /vnc``."""
+    success = {
+        "description": (
+            "Viewer page framing `/vnc/app/vnc.html`. Sets the HttpOnly session cookie "
+            f"`{SESSION_COOKIE_NAME}` (Path=/vnc, SameSite=Strict) used by the viewer's files "
+            "and WebSocket."
+        ),
+        "headers": {
+            "Set-Cookie": _header("The viewer session cookie."),
+            **SECURITY_RESPONSE_HEADERS,
+        },
+        "content": {"text/html": {"schema": {"type": "string"}}},
+    }
+    return {200: success, **AUTH_RESPONSES}
+
+
+def vnc_asset_responses() -> dict:
+    """Responses of ``GET /vnc/app/{asset_path}``."""
+    success = {
+        "description": "The noVNC file, relayed unchanged.",
+        "headers": SECURITY_RESPONSE_HEADERS,
+        "content": {"*/*": {"schema": {"type": "string", "format": "binary"}}},
+    }
+    return {
+        200: success,
+        **AUTH_RESPONSES,
+        404: _error("`NOT_FOUND`: path not allowed or not part of noVNC."),
+        502: _error("`VNC_UNAVAILABLE`: the in-container noVNC server did not answer."),
+    }
+
+
 TRACE_REQUEST_PARAMETER = {
     "parameters": [
         {
@@ -135,6 +193,10 @@ TRACE_REQUEST_PARAMETER = {
         }
     ]
 }
+
+
+VNC_PAGE_PATH = "/vnc"
+BEARER_PATHS = frozenset({"/api/v1/render", "/health/detail"})
 
 
 def install_openapi(app: FastAPI) -> None:
@@ -166,27 +228,36 @@ def _drop_default_validation_responses(schema: dict[str, Any]) -> None:
         components.pop(name, None)
 
 
-def _configure_security_schemes(schema: dict[str, Any]) -> None:
-    components = schema.setdefault("components", {})
-    components["securitySchemes"] = {
-        "HTTPBearer": {
-            "type": "http",
-            "scheme": "bearer",
-            "description": "API Key passed as Bearer token in the Authorization header.",
-        },
-        "HTTPBasic": {
-            "type": "http",
-            "scheme": "basic",
-            "description": (
-                "HTTP Basic Auth for VNC viewer (username optional, password = API key)."
-            ),
-        },
-    }
+SECURITY_SCHEMES = {
+    "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API Key passed as Bearer token in the Authorization header.",
+    },
+    "HTTPBasic": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "HTTP Basic for the VNC viewer (any username, password = API key).",
+    },
+    "VncSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": SESSION_COOKIE_NAME,
+        "description": "Session cookie set by `GET /vnc`; accepted by the viewer's files.",
+    },
+}
 
-    paths = schema.get("paths", {})
-    for path, methods in paths.items():
+
+def _configure_security_schemes(schema: dict[str, Any]) -> None:
+    schema.setdefault("components", {})["securitySchemes"] = SECURITY_SCHEMES
+    for path, methods in schema.get("paths", {}).items():
         for operation in methods.values():
-            if path == "/vnc":
-                operation["security"] = [{"HTTPBasic": []}]
-            elif path in ("/api/v1/render", "/health/detail"):
-                operation["security"] = [{"HTTPBearer": []}]
+            operation["security"] = _security_of(path)
+
+
+def _security_of(path: str) -> list[dict[str, list]]:
+    if path == VNC_PAGE_PATH:
+        return [{"HTTPBasic": []}]
+    if path.startswith(VNC_PAGE_PATH):
+        return [{"HTTPBasic": []}, {"VncSession": []}]
+    return [{"HTTPBearer": []}] if path in BEARER_PATHS else []

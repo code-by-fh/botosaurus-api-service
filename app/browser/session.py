@@ -1,10 +1,16 @@
 """One running Chrome instance, driven by zendriver.
 
 Every render gets its own browser context (comparable to a fresh incognito
-window): no cookies, storage or cache leak between requests of different
-client apps. Each context is pointed at the egress proxy for its route, and
-the browser's own background traffic goes through the direct egress proxy, so
-nothing leaves Chrome unchecked.
+window): no storage, cache or cookies leak between requests of different
+client apps, with exactly one exception. Allow-listed anti-bot clearance
+cookies (``app.scraping.clearance``) are copied into a new context when an
+earlier render on the same egress route earned them, for at most
+``CLEARANCE_MAX_AGE_SECONDS``. They prove a solved challenge and carry no user
+identity; no other cookie is ever carried over.
+
+Each context is pointed at the egress proxy for its route, and the browser's
+own background traffic goes through the direct egress proxy, so nothing leaves
+Chrome unchecked.
 """
 
 import asyncio
@@ -71,6 +77,34 @@ async def launch_chrome(spec: LaunchSpec) -> zendriver.Browser:
     return await zendriver.Browser.create(config)
 
 
+class ContextCookies:
+    """Cookie access to exactly one browser context over the browser's CDP connection.
+
+    The Storage commands run on the browser endpoint with an explicit context
+    id; without one Chrome would use its default context, shared by all tabs.
+    """
+
+    def __init__(self, browser: zendriver.Browser, context_id: cdp.browser.BrowserContextID):
+        self._browser = browser
+        self._context_id = context_id
+
+    async def add(self, cookies: list[cdp.network.CookieParam]) -> None:
+        """Set ``cookies`` in the context.
+
+        :raises ProtocolException: if Chrome rejects the command or the connection is gone.
+        """
+        command = cdp.storage.set_cookies(cookies, browser_context_id=self._context_id)
+        await self._browser.connection.send(command)
+
+    async def read(self) -> list[cdp.network.Cookie]:
+        """All cookies of the context.
+
+        :raises ProtocolException: if Chrome rejects the command or the connection is gone.
+        """
+        command = cdp.storage.get_cookies(browser_context_id=self._context_id)
+        return await self._browser.connection.send(command)
+
+
 class BrowserSession:
     """A started browser that hands out isolated tabs."""
 
@@ -97,6 +131,11 @@ class BrowserSession:
         return await self._browser.create_context(
             proxy_server=proxy, proxy_bypass_list=[NO_IMPLICIT_BYPASS]
         )
+
+    def context_cookies(self, tab: zendriver.Tab) -> ContextCookies | None:
+        """Cookie access to the context of ``tab``; ``None`` if it has no own context."""
+        context_id = tab.target.browser_context_id if tab.target else None
+        return None if context_id is None else ContextCookies(self._browser, context_id)
 
     async def close_tab(self, tab: zendriver.Tab) -> None:
         """Dispose the tab's browser context, dropping all of its state.

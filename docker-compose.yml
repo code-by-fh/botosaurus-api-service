@@ -1,11 +1,10 @@
 services:
-  botosaurus-api:
+  page-render-service:
     build: .
     ports:
+      # The only published port. The noVNC debug view (ENABLE_VNC=true) and the
+      # API docs (ENABLE_DOCS=true) are served through it, behind authentication.
       - "8000:8000"
-      # noVNC debug view: bound to localhost only, reach it via SSH tunnel or a
-      # reverse proxy. Only active with ENABLE_VNC=true.
-      - "127.0.0.1:6080:6080"
     env_file:
       - .env        # API_KEYS (required), HOME_PROXY, VNC_PASSWORD, ...
     environment:
@@ -15,6 +14,7 @@ services:
       MAX_WORKERS: "${MAX_WORKERS:-3}"
       HEADLESS: "${HEADLESS:-false}"
       ENABLE_VNC: "${ENABLE_VNC:-false}"
+      ENABLE_DOCS: "${ENABLE_DOCS:-false}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     restart: unless-stopped
     read_only: true

@@ -5,36 +5,44 @@ Start with ``uvicorn --factory app.main:create_app``.
 
 import asyncio
 import logging
-import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, FastAPI, Request, Response
 
 import app.logging_config  # noqa: F401 -- configures logging on import
 from app.api_models import RenderRequest
-from app.auth import basic_guard, bearer_guard
+from app.auth import Authenticator, bearer_guard
+from app.auth_throttle import FailedAuthLimiter
 from app.config import Settings, load_settings
 from app.content.output import OutputSpec, build_output
-from app.errors import install_error_handling
-from app.novnc_proxy import novnc_proxy_router
+from app.docs_routes import docs_router
+from app.errors import ServiceError, install_error_handling, trace_id_of
 from app.openapi_docs import (
+    AUTH_RESPONSES,
     TRACE_REQUEST_PARAMETER,
-    UNAUTHORIZED_RESPONSE,
     install_openapi,
     render_responses,
 )
 from app.runtime import Runtime, start_runtime
-from app.scraping.scraper import ScrapeRequest
-from app.vnc import vnc_page
+from app.scraping.clearance import ClearanceStore
+from app.scraping.scraper import ScrapeRequest, ScrapeResult
+from app.security_headers import install_security_headers
+from app.timing import Phase, PhaseTimer
+from app.vnc import VncAccess, vnc_router
+from app.vnc_proxy import VncUpstream
+from app.vnc_session import SessionSigner
 
 log = logging.getLogger("render.api")
 
+SERVICE_NAME = "page-render-service"
 SERVICE_VERSION = "2.0.0"
 API_PREFIX = "/api/v1"
 URL_SAFE_CHARACTERS = ":/?#[]@!$&'()*+,;=%~"
+OUTCOME_OK = "ok"
+OUTCOME_UNEXPECTED = "INTERNAL_ERROR"
+NO_ENGINE = "none"
 
 RuntimeStarter = Callable[[Settings], Awaitable[Runtime]]
 
@@ -43,7 +51,7 @@ def _runtime(request: Request) -> Runtime:
     return request.app.state.runtime
 
 
-def _to_scrape_request(body: RenderRequest) -> ScrapeRequest:
+def _to_scrape_request(body: RenderRequest, timer: PhaseTimer) -> ScrapeRequest:
     return ScrapeRequest(
         url=str(body.url),
         mode=body.mode,
@@ -53,21 +61,54 @@ def _to_scrape_request(body: RenderRequest) -> ScrapeRequest:
         use_proxy=body.use_proxy,
         block_resources=body.block_resources,
         idle_timeout_seconds=float(body.idle_timeout) if body.idle_timeout else None,
+        wait_for_settle_seconds=body.wait_for_settle,
+        timer=timer,
     )
 
 
-async def _render(body: RenderRequest, runtime: Runtime) -> Response:
-    started = time.monotonic()
-    result = await runtime.scraper.scrape(_to_scrape_request(body))
-    output = await asyncio.to_thread(
-        build_output, result.html, OutputSpec(body.selector, body.format)
-    )
-    log.info(
-        "Rendered %s via %s in %.2fs",
-        body.url,
-        result.engine,
-        time.monotonic() - started,
-    )
+class _RenderLog:
+    """What the per-request timing line reports besides the phase durations."""
+
+    def __init__(self, body: RenderRequest, trace_id: str):
+        self.body = body
+        self.trace_id = trace_id
+        self.outcome = OUTCOME_UNEXPECTED
+        self.engine = NO_ENGINE
+
+    def write(self, timer: PhaseTimer) -> None:
+        log.info(
+            "Render timing traceId=%s url=%s outcome=%s engine=%s %s",
+            self.trace_id,
+            self.body.url,
+            self.outcome,
+            self.engine,
+            timer.summary(),
+        )
+
+
+async def _render(body: RenderRequest, runtime: Runtime, trace_id: str) -> Response:
+    # Logged for failures too: a slow TARGET_BLOCKED or TIMEOUT is exactly the
+    # case whose time needs explaining.
+    timer = PhaseTimer()
+    render_log = _RenderLog(body, trace_id)
+    try:
+        result = await runtime.scraper.scrape(_to_scrape_request(body, timer))
+        render_log.engine = result.engine
+        response = await _respond(body, result, timer)
+        render_log.outcome = OUTCOME_OK
+        return response
+    except ServiceError as exc:
+        render_log.outcome = exc.code
+        raise
+    finally:
+        render_log.write(timer)
+
+
+async def _respond(body: RenderRequest, result: ScrapeResult, timer: PhaseTimer) -> Response:
+    with timer.phase(Phase.OUTPUT):
+        output = await asyncio.to_thread(
+            build_output, result.html, OutputSpec(body.selector, body.format)
+        )
     headers = {
         "X-Render-Engine": result.engine,
         "X-Render-Stable": str(result.stable).lower(),
@@ -77,7 +118,12 @@ async def _render(body: RenderRequest, runtime: Runtime) -> Response:
     return Response(content=output.content, media_type=output.media_type, headers=headers)
 
 
-def _health_router(settings: Settings) -> APIRouter:
+def _clearance_stats(store: ClearanceStore | None) -> dict:
+    # Only the count: cookie names, hosts and values stay out of every response.
+    return {"enabled": store is not None, "entries": store.count() if store else 0}
+
+
+def _health_router(authenticator: Authenticator) -> APIRouter:
     router = APIRouter(tags=["Health"])
 
     @router.get("/health", summary="Liveness probe (no authentication)")
@@ -86,9 +132,9 @@ def _health_router(settings: Settings) -> APIRouter:
 
     @router.get(
         "/health/detail",
-        summary="Pool utilisation and learned HTTP verdicts",
-        dependencies=[Depends(bearer_guard(settings.api_keys))],
-        responses={401: UNAUTHORIZED_RESPONSE},
+        summary="Pool utilisation, learned HTTP verdicts and stored clearance count",
+        dependencies=[Depends(bearer_guard(authenticator))],
+        responses=AUTH_RESPONSES,
     )
     def health_detail(request: Request) -> dict:
         runtime = _runtime(request)
@@ -97,13 +143,14 @@ def _health_router(settings: Settings) -> APIRouter:
             "version": SERVICE_VERSION,
             "pool": vars(runtime.pool.stats()),
             "verdicts": runtime.verdicts.counts(),
+            "clearance": _clearance_stats(runtime.clearance),
         }
 
     return router
 
 
-def _render_router(settings: Settings) -> APIRouter:
-    router = APIRouter(tags=["Render"], dependencies=[Depends(bearer_guard(settings.api_keys))])
+def _render_router(authenticator: Authenticator) -> APIRouter:
+    router = APIRouter(tags=["Render"], dependencies=[Depends(bearer_guard(authenticator))])
 
     @router.post(
         f"{API_PREFIX}/render",
@@ -113,46 +160,35 @@ def _render_router(settings: Settings) -> APIRouter:
         openapi_extra=TRACE_REQUEST_PARAMETER,
     )
     async def render(body: RenderRequest, request: Request) -> Response:
-        return await _render(body, _runtime(request))
+        return await _render(body, _runtime(request), trace_id_of(request))
 
     return router
 
 
-def _vnc_router(settings: Settings) -> APIRouter:
-    router = APIRouter(tags=["VNC"], dependencies=[Depends(basic_guard(settings.api_keys))])
+def _include_routers(application: FastAPI, settings: Settings) -> None:
+    access = settings.access
+    authenticator = Authenticator(settings.api_keys, FailedAuthLimiter(), access.trusted_proxies)
+    application.include_router(_health_router(authenticator))
+    application.include_router(_render_router(authenticator))
+    if access.docs_enabled:
+        application.include_router(
+            docs_router(application.title, application.openapi, authenticator)
+        )
+    if access.vnc_enabled:
+        vnc = VncAccess(authenticator, SessionSigner(), VncUpstream(access.vnc_port))
+        application.include_router(vnc_router(vnc))
 
-    @router.get(
-        "/vnc",
-        summary="noVNC live view of headed Chrome instances",
-        description=(
-            "Serves an HTML page embedding the noVNC viewer in an iframe, or "
-            "redirects to the reverse-proxied noVNC viewer if NOVNC_PREFIX is "
-            "set. Requires ENABLE_VNC=true. Protected by HTTP Basic Auth (use "
-            "any username, password = API key)."
-        ),
-        response_class=Response,
-        responses={
-            200: {"description": "Viewer HTML page embedding noVNC", "content": {"text/html": {}}},
-            307: {
-                "description": "Redirects to reverse-proxied noVNC viewer when NOVNC_PREFIX is set"
-            },
-            401: UNAUTHORIZED_RESPONSE,
-            404: {"description": "`NOT_FOUND`: VNC is disabled (`ENABLE_VNC=false`)"},
-        },
+
+def _new_application(lifespan: Callable) -> FastAPI:
+    # The built-in documentation routes are public; docs_routes replaces them.
+    return FastAPI(
+        title=SERVICE_NAME,
+        version=SERVICE_VERSION,
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
-    def vnc(request: Request) -> Response:
-        if not settings.vnc_enabled:
-            raise HTTPException(status_code=404, detail="VNC is disabled")
-        if settings.novnc_prefix:
-            clean_prefix = "/" + settings.novnc_prefix.strip("/")
-            ws_path = clean_prefix.lstrip("/") + "/websockify"
-            target_url = f"{clean_prefix}/vnc.html?autoconnect=true&resize=scale&path={ws_path}"
-            return RedirectResponse(url=target_url, status_code=307)
-        host = request.url.hostname or "localhost"
-        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-        return Response(content=vnc_page(host, scheme), media_type="text/html")
-
-    return router
 
 
 def create_app(
@@ -169,20 +205,13 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         application.state.runtime = await runtime_starter(resolved)
-        log.info("render-api-service %s ready", SERVICE_VERSION)
+        log.info("%s %s ready", SERVICE_NAME, SERVICE_VERSION)
         yield
         await application.state.runtime.close()
 
-    application = FastAPI(title="render-api-service", version=SERVICE_VERSION, lifespan=lifespan)
+    application = _new_application(lifespan)
     install_error_handling(application)
+    install_security_headers(application)
     install_openapi(application)
-    for router in (
-        _health_router(resolved),
-        _render_router(resolved),
-        _vnc_router(resolved),
-    ):
-        application.include_router(router)
-    if resolved.novnc_prefix:
-        log.info("noVNC proxy mounted at %s", resolved.novnc_prefix)
-        application.include_router(novnc_proxy_router(resolved.novnc_prefix, resolved.vnc_enabled))
+    _include_routers(application, resolved)
     return application

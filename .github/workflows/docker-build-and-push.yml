@@ -69,6 +69,6 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            doublelayer/botosaurus-api-service:${{ steps.vars.outputs.TAG }}
-          cache-from: type=gha,scope=botosaurus-api
-          cache-to: type=gha,mode=max,scope=botosaurus-api
+            doublelayer/page-render-service:${{ steps.vars.outputs.TAG }}
+          cache-from: type=gha,scope=page-render-service
+          cache-to: type=gha,mode=max,scope=page-render-service

@@ -12,7 +12,8 @@ Anything else is rendered in Chrome. ``mode="browser"`` skips HTTP entirely.
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -25,6 +26,7 @@ from app.fetch.http_fetcher import HttpFetcher, HttpFetchRequest
 from app.scraping.host_limiter import HostLimiter
 from app.scraping.verdicts import Verdict, VerdictStore, section_key
 from app.scraping.verifier import HttpVerifier, VerificationSample
+from app.timing import Phase, PhaseTimer
 from app.url_guard import UrlGuard
 
 log = logging.getLogger("render.scraper")
@@ -47,6 +49,8 @@ class ScrapeRequest:
     use_proxy: bool
     block_resources: bool
     idle_timeout_seconds: float | None = None
+    wait_for_settle_seconds: float | None = None
+    timer: PhaseTimer = field(default_factory=PhaseTimer, compare=False, repr=False)
 
     @property
     def required_selectors(self) -> tuple[str, ...]:
@@ -100,17 +104,11 @@ class Scraper:
         if request.use_proxy and not self._parts.egress.has_proxy:
             raise ProxyNotConfiguredError("use_proxy is true, but HOME_PROXY is not set")
         await self._parts.guard.check(request.url)
-        log.debug(
-            "Scraping %s | mode=%s use_proxy=%s block_resources=%s timeout=%ss",
-            request.url,
-            request.mode,
-            request.use_proxy,
-            request.block_resources,
-            request.timeout_seconds,
-        )
-        if request.use_proxy:
-            log.info("Request for %s routed via HOME_PROXY", request.url)
-        async with self._parts.limiter.slot(request.host):
+        _log_request(request)
+        async with AsyncExitStack() as host_slot:
+            # Only acquiring the slot is timed, not the work done while holding it.
+            with request.timer.phase(Phase.HOST_WAIT):
+                await host_slot.enter_async_context(self._parts.limiter.slot(request.host))
             http_result = await self._try_http(request)
             if http_result is not None:
                 return http_result
@@ -122,14 +120,17 @@ class Scraper:
         return self._http_first and request.mode == "auto"
 
     async def _try_http(self, request: ScrapeRequest) -> ScrapeResult | None:
-        key = section_key(request.url)
         if not self._http_allowed(request):
             log.debug("HTTP fast path disabled for %s (mode=%s)", request.url, request.mode)
             return None
-        verdict = self._parts.verdicts.get(key)
+        verdict = self._parts.verdicts.get(section_key(request.url))
         if verdict is not Verdict.HTTP_SUFFICIENT:
             log.debug("Section verdict for %s is %s, using browser", request.url, verdict)
             return None
+        with request.timer.phase(Phase.HTTP):
+            return await self._fetch_verified(request)
+
+    async def _fetch_verified(self, request: ScrapeRequest) -> ScrapeResult | None:
         try:
             page = await self._parts.fetcher.fetch(self._fetch_request(request))
         except NavigationError as exc:
@@ -141,7 +142,7 @@ class Scraper:
         reason = await asyncio.to_thread(_rejection_reason, page, request.required_selectors)
         if reason:
             log.info("HTTP result for %s rejected (%s), using browser", request.url, reason)
-            self._parts.verdicts.record_mismatch(key)
+            self._parts.verdicts.record_mismatch(section_key(request.url))
             return None
         log.debug("HTTP fast path succeeded for %s", request.url)
         return ScrapeResult(page.html, page.final_url, "http", True, page.status)
@@ -171,6 +172,19 @@ class Scraper:
         return HttpFetchRequest(request.url, request.timeout_seconds, proxy)
 
 
+def _log_request(request: ScrapeRequest) -> None:
+    log.debug(
+        "Scraping %s | mode=%s use_proxy=%s block_resources=%s timeout=%ss",
+        request.url,
+        request.mode,
+        request.use_proxy,
+        request.block_resources,
+        request.timeout_seconds,
+    )
+    if request.use_proxy:
+        log.info("Request for %s routed via HOME_PROXY", request.url)
+
+
 def _rejection_reason(page, required_selectors: tuple[str, ...]) -> str | None:
     if not page.is_html_document:
         return f"status {page.status}, content type '{page.content_type}'"
@@ -185,4 +199,6 @@ def _browser_job(request: ScrapeRequest) -> BrowserJob:
         use_proxy=request.use_proxy,
         block_resources=request.block_resources,
         idle_timeout_seconds=request.idle_timeout_seconds,
+        wait_for_settle_seconds=request.wait_for_settle_seconds,
+        timer=request.timer,
     )

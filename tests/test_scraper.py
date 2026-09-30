@@ -1,9 +1,11 @@
 import pytest
 
-from app.errors import ProxyNotConfiguredError, TargetNotAllowedError
+import app.browser.page_loader as page_loader
+from app.errors import ProxyNotConfiguredError, TargetBlockedError, TargetNotAllowedError
 from app.runtime import Adapters, Runtime, start_runtime
 from app.scraping.scraper import ScrapeRequest
 from app.scraping.verdicts import Verdict, section_key
+from app.timing import PhaseTimer
 from tests.fakes import (
     CHALLENGE_HTML,
     SERVER_RENDERED_HTML,
@@ -14,11 +16,13 @@ from tests.fakes import (
     http_page,
     make_settings,
     public_resolver,
+    stable_probe,
 )
 
 ARTICLE_URL = "https://news.example/articles/1"
 OTHER_ARTICLE_URL = "https://news.example/articles/2"
 APP_URL = "https://app.example/dashboard"
+SHORT_BUDGET_SECONDS = 0.05
 
 
 def scrape_request(url: str, **changes) -> ScrapeRequest:
@@ -233,3 +237,103 @@ async def test_private_targets_are_rejected_before_any_request():
     with pytest.raises(TargetNotAllowedError):
         await runtime.scraper.scrape(scrape_request("http://intranet.example/"))
     assert fetcher.requests == []
+
+
+class SteppingClock:
+    """Advances one second per reading, so every timed phase lasts a whole number of seconds."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        self.now += 1.0
+        return self.now
+
+
+@pytest.mark.anyio
+async def test_browser_render_records_each_phase_in_order():
+    harness = await start_harness(server_rendered_site())
+    timer = PhaseTimer(SteppingClock())
+
+    await harness.scrape(ARTICLE_URL, timer=timer)
+
+    assert list(timer.durations_ms()) == [
+        "host_wait",
+        "queue",
+        "context",
+        "navigate",
+        "readiness",
+        "read",
+        "total",
+    ]
+    assert timer.durations_ms()["queue"] == 1000
+    assert timer.notes() == {
+        "readiness_end": "settled",
+        "challenge_polls": "0",
+        "clearance": "none",
+    }
+
+
+@pytest.mark.anyio
+async def test_verified_http_result_records_only_the_http_phase():
+    harness = await start_harness(server_rendered_site())
+    await harness.scrape(ARTICLE_URL)
+    await harness.scrape(OTHER_ARTICLE_URL)
+    timer = PhaseTimer(SteppingClock())
+
+    result = await harness.scrape(ARTICLE_URL, timer=timer)
+
+    assert result.engine == "http"
+    assert list(timer.durations_ms()) == ["host_wait", "http", "total"]
+    assert timer.notes() == {}
+
+
+@pytest.mark.anyio
+async def test_unresolved_challenge_records_readiness_end_and_challenge_polls(monkeypatch):
+    monkeypatch.setattr(page_loader, "MIN_READINESS_BUDGET_SECONDS", SHORT_BUDGET_SECONDS)
+    challenged = FakePage(html=CHALLENGE_HTML, probes=[stable_probe(challenge=True)])
+    harness = await start_harness({}, pages={ARTICLE_URL: challenged})
+    timer = PhaseTimer()
+
+    with pytest.raises(TargetBlockedError):
+        await harness.scrape(ARTICLE_URL, timer=timer, timeout_seconds=SHORT_BUDGET_SECONDS)
+
+    assert timer.notes()["readiness_end"] == "challenge"
+    assert int(timer.notes()["challenge_polls"]) > 0
+    assert "read" not in timer.durations_ms()
+
+
+def restless_page() -> FakePage:
+    return FakePage(probes=[stable_probe(text_length=length) for length in range(1, 100_000)])
+
+
+@pytest.mark.anyio
+async def test_restless_page_is_not_cut_short_before_the_default_settle_window(monkeypatch):
+    monkeypatch.setattr(page_loader, "MIN_READINESS_BUDGET_SECONDS", SHORT_BUDGET_SECONDS)
+    harness = await start_harness({}, pages={ARTICLE_URL: restless_page()})
+    timer = PhaseTimer()
+
+    result = await harness.scrape(
+        ARTICLE_URL, wait_for="#price", timeout_seconds=SHORT_BUDGET_SECONDS, timer=timer
+    )
+
+    assert result.stable is False
+    assert timer.notes()["readiness_end"] == "deadline"
+
+
+@pytest.mark.anyio
+async def test_zero_wait_for_settle_returns_restless_page_once_element_is_found(monkeypatch):
+    monkeypatch.setattr(page_loader, "MIN_READINESS_BUDGET_SECONDS", SHORT_BUDGET_SECONDS)
+    harness = await start_harness({}, pages={ARTICLE_URL: restless_page()})
+    timer = PhaseTimer()
+
+    result = await harness.scrape(
+        ARTICLE_URL,
+        wait_for="#price",
+        timeout_seconds=SHORT_BUDGET_SECONDS,
+        wait_for_settle_seconds=0.0,
+        timer=timer,
+    )
+
+    assert result.stable is False
+    assert timer.notes()["readiness_end"] == "wait-for-found"

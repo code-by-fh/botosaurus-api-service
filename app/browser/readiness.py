@@ -4,7 +4,8 @@
 after it. A page counts as ready when, at the same time,
 
 - ``document.readyState`` is ``complete`` (or the load budget is used up),
-- no anti-bot challenge is shown,
+- no anti-bot challenge is shown (``completeness`` defines what counts as one;
+  the probe evaluates those definitions in the page),
 - the ``wait_for`` element (if any) exists, and
 - the amount of visible text and the number of DOM nodes have not changed for
   ``STABLE_POLLS`` consecutive polls; until the load budget is used up, the
@@ -17,7 +18,9 @@ Two shortcuts avoid waiting for the full timeout:
 
 - The ``wait_for`` element is present on a loaded page, but the DOM never
   settles (carousels, tickers): the page is returned ``found_settle_seconds``
-  after the element appeared, marked as not stable. Without ``wait_for`` there
+  after the element appeared, marked as not stable. Callers may shorten this
+  window (down to 0) per request with ``wait_for_settle``, accepting that
+  content still being appended after the element appeared may be cut off. Without ``wait_for`` there
   is no such shortcut, since a changing page may still be rendering.
 - Only when the caller sets ``idle_give_up_seconds``: the ``wait_for`` element
   is missing, but the loaded page has been completely idle (no DOM change and
@@ -26,16 +29,28 @@ Two shortcuts avoid waiting for the full timeout:
   coming: content scheduled by a timer or pushed over a websocket arrives
   without any prior activity, and a pending timer cannot be observed without
   patching the page (itself a bot signal).
+
+After ``wait`` returns or raises, ``ReadinessWaiter.end`` tells why it stopped
+and ``challenge_polls`` how many polls saw a challenge; both are logged per
+request to explain where render time went.
 """
 
 import asyncio
 import json
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Protocol
 
 from zendriver.core.connection import ProtocolException
 
-from app.content.completeness import CHALLENGE_BODY_MARKERS, CHALLENGE_TITLE_PATTERN
+from app.content.completeness import (
+    CHALLENGE_BODY_MARKERS,
+    CHALLENGE_SDK_MARKERS,
+    CHALLENGE_TITLE_PATTERN,
+    HUMAN_VERIFICATION_PATTERN,
+    INTERSTITIAL_MAX_TEXT_CHARS,
+    VERIFICATION_TEXT_TAGS,
+)
 from app.errors import RenderTimeoutError, TargetBlockedError
 
 POLL_INTERVAL_SECONDS = 0.3
@@ -44,25 +59,54 @@ LOAD_BUDGET_SHARE = 0.6
 
 PROBE_SCRIPT_TEMPLATE = """(() => {
   const selector = %(selector)s;
-  const markers = %(markers)s;
-  const titlePattern = new RegExp(%(title_pattern)s, "i");
+  const signals = %(signals)s;
   const root = document.documentElement;
   const html = root ? root.outerHTML.toLowerCase() : "";
+  const textLength = document.body ? document.body.innerText.length : 0;
+  const includes = (marker) => html.includes(marker);
+  const vendorTitle = new RegExp(signals.vendorTitle, "i");
+  const verification = new RegExp(signals.verification, "i");
+  const verificationTexts = Array.from(
+    document.querySelectorAll(signals.verificationTags.join(",")),
+    (element) => element.textContent || ""
+  );
+  const vendor = vendorTitle.test(document.title) || signals.markers.some(includes);
+  const hinted = verificationTexts.some((text) => verification.test(text))
+    || signals.sdkMarkers.some((group) => group.every(includes));
   let found = true;
   if (selector !== null) {
     try { found = document.querySelector(selector) !== null; } catch (e) { found = false; }
   }
   return {
     ready: document.readyState,
-    textLength: document.body ? document.body.innerText.length : 0,
+    textLength: textLength,
     nodeCount: document.getElementsByTagName("*").length,
     requestCount: performance.getEntriesByType("resource").filter(
       (entry) => entry.initiatorType === "xmlhttprequest" || entry.initiatorType === "fetch"
     ).length,
-    challenge: titlePattern.test(document.title) || markers.some((m) => html.includes(m)),
+    challenge: vendor || (hinted && textLength < signals.interstitialMaxText),
     found: found,
   };
 })()"""
+
+
+class ReadinessEnd(Enum):
+    """Why the readiness wait stopped."""
+
+    SETTLED = "settled"
+    """Content stopped changing while the load budget was still running."""
+    LOAD_BUDGET_EXPIRED = "load-budget-expired"
+    """Content stopped changing only after the load budget, with network activity ignored."""
+    WAIT_FOR_FOUND = "wait-for-found"
+    """The ``wait_for`` element was present long enough; the DOM never settled."""
+    DEADLINE = "deadline"
+    """The budget ran out while the content was still changing."""
+    CHALLENGE = "challenge"
+    """A challenge was still shown at the deadline."""
+    ELEMENT_MISSING = "element-missing"
+    """The ``wait_for`` element had not appeared at the deadline."""
+    IDLE_GIVE_UP = "idle-give-up"
+    """The ``wait_for`` element was missing and the loaded page stayed idle."""
 
 
 class EvaluatingTab(Protocol):
@@ -109,12 +153,21 @@ class PageProbe:
 NOT_READY = PageProbe(False, 0, 0, 0, False, False)
 
 
+CHALLENGE_SIGNALS = {
+    "vendorTitle": CHALLENGE_TITLE_PATTERN.pattern,
+    "markers": list(CHALLENGE_BODY_MARKERS),
+    "verification": HUMAN_VERIFICATION_PATTERN.pattern,
+    "verificationTags": list(VERIFICATION_TEXT_TAGS),
+    "sdkMarkers": [list(group) for group in CHALLENGE_SDK_MARKERS],
+    "interstitialMaxText": INTERSTITIAL_MAX_TEXT_CHARS,
+}
+
+
 def build_probe_script(wait_for: str | None) -> str:
     """Return the JavaScript probe; all values are JSON-encoded, never interpolated raw."""
     return PROBE_SCRIPT_TEMPLATE % {
         "selector": json.dumps(wait_for),
-        "markers": json.dumps(list(CHALLENGE_BODY_MARKERS)),
-        "title_pattern": json.dumps(CHALLENGE_TITLE_PATTERN.pattern),
+        "signals": json.dumps(CHALLENGE_SIGNALS),
     }
 
 
@@ -162,7 +215,12 @@ class _Progress:
 
 
 class ReadinessWaiter:
-    """Polls a tab until it is ready or the time budget is spent."""
+    """Polls a tab until it is ready or the time budget is spent.
+
+    ``end`` is the ``ReadinessEnd`` once ``wait`` has returned or raised (``None``
+    before, or if the wait was cancelled); ``challenge_polls`` counts the polls
+    that saw a challenge, including one that resolved later.
+    """
 
     def __init__(
         self,
@@ -174,6 +232,8 @@ class ReadinessWaiter:
         self._target = target
         self._timings = timings
         self._script = build_probe_script(target.wait_for)
+        self.end: ReadinessEnd | None = None
+        self.challenge_polls = 0
 
     async def wait(self) -> bool:
         """Wait for readiness.
@@ -193,6 +253,7 @@ class ReadinessWaiter:
         while True:
             current = await probe(self._tab, self._script)
             now = loop.time()
+            self.challenge_polls += int(current.challenge)
             load_budget_spent = now >= load_deadline
             progress.update(current, now, include_network=not load_budget_spent)
             outcome = self._decide(current, progress, now, load_budget_spent)
@@ -208,10 +269,12 @@ class ReadinessWaiter:
         loaded = current.ready or load_budget_spent
         settled = progress.unchanged_polls >= STABLE_POLLS - 1
         if loaded and settled and current.found and not current.challenge:
-            return True
+            ended = ReadinessEnd.LOAD_BUDGET_EXPIRED if load_budget_spent else ReadinessEnd.SETTLED
+            return self._finish(ended, stable=True)
         if self._target.wait_for and self._found_long_enough(progress, now):
-            return False
+            return self._finish(ReadinessEnd.WAIT_FOR_FOUND, stable=False)
         if self._element_is_not_coming(current, progress, now):
+            self.end = ReadinessEnd.IDLE_GIVE_UP
             raise RenderTimeoutError(
                 f"'{self._target.wait_for}' did not appear; the page finished loading and "
                 f"stayed idle for {self._timings.idle_give_up_seconds:.0f}s"
@@ -233,12 +296,18 @@ class ReadinessWaiter:
         waiting_for_element = current.ready and not current.found and not current.challenge
         return waiting_for_element and now - progress.idle_since >= give_up_after
 
+    def _finish(self, end: ReadinessEnd, stable: bool) -> bool:
+        self.end = end
+        return stable
+
     def _at_deadline(self, current: PageProbe) -> bool:
         if current.challenge:
+            self.end = ReadinessEnd.CHALLENGE
             raise TargetBlockedError("The target kept showing an anti-bot challenge")
         if not current.found:
+            self.end = ReadinessEnd.ELEMENT_MISSING
             raise RenderTimeoutError(
                 f"Timed out after {self._target.budget_seconds:.0f}s "
                 f"waiting for '{self._target.wait_for}'"
             )
-        return False
+        return self._finish(ReadinessEnd.DEADLINE, stable=False)

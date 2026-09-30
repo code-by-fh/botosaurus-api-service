@@ -1,5 +1,6 @@
 """Wires all components together and owns their lifecycle."""
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -9,6 +10,7 @@ from app.browser.worker import BrowserWorker
 from app.config import Settings
 from app.egress import EgressGateway
 from app.fetch.http_fetcher import HttpFetcher
+from app.scraping.clearance import ClearanceStore
 from app.scraping.host_limiter import HostLimiter
 from app.scraping.scraper import Scraper, ScraperComponents
 from app.scraping.verdicts import VerdictStore
@@ -30,12 +32,13 @@ def _default_fetcher(guard: UrlGuard, settings: Settings) -> HttpFetcher:
 
 @dataclass(frozen=True)
 class Adapters:
-    """Connections to the outside world (and the randomness source); replaced in tests."""
+    """Connections to the outside world (plus randomness and wall clock); replaced in tests."""
 
     launcher: Launcher = launch_chrome
     fetcher_factory: FetcherFactory = _default_fetcher
     resolver: Resolver = field(default=resolve_host)
     pause: PauseSource = field(default=random_pause)
+    wall_clock: Callable[[], float] = field(default=time.time)
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,7 @@ class Runtime:
     fetcher: HttpFetcher
     verdicts: VerdictStore
     verifier: HttpVerifier
+    clearance: ClearanceStore | None
 
     async def close(self) -> None:
         """Stop background verification, browsers, HTTP connections and egress proxies."""
@@ -79,14 +83,24 @@ async def start_runtime(settings: Settings, adapters: Adapters | None = None) ->
     )
     egress = EgressGateway(guard, settings.browser.proxy_url)
     await egress.start()
-    pool = await _start_pool(settings, SessionFactory(settings.browser, adapters.launcher, egress))
+    clearance = _clearance_store(settings, adapters)
+    factory = SessionFactory(settings.browser, adapters.launcher, egress)
+    pool = await _start_pool(settings, factory, clearance)
     components = ScraperComponents(guard, egress, pool, fetcher, verdicts, verifier, limiter)
     scraper = Scraper(components, settings.http_first.enabled)
-    return Runtime(scraper, egress, pool, fetcher, verdicts, verifier)
+    return Runtime(scraper, egress, pool, fetcher, verdicts, verifier, clearance)
 
 
-async def _start_pool(settings: Settings, factory: SessionFactory) -> BrowserPool:
-    workers = [BrowserWorker(factory) for _ in range(settings.browser.worker_count)]
+def _clearance_store(settings: Settings, adapters: Adapters) -> ClearanceStore | None:
+    if not settings.clearance.enabled:
+        return None
+    return ClearanceStore(settings.clearance.max_age_seconds, adapters.wall_clock)
+
+
+async def _start_pool(
+    settings: Settings, factory: SessionFactory, clearance: ClearanceStore | None
+) -> BrowserPool:
+    workers = [BrowserWorker(factory, clearance) for _ in range(settings.browser.worker_count)]
     pool = BrowserPool(workers, settings.queue)
     await pool.start()
     return pool

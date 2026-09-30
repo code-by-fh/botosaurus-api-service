@@ -13,6 +13,8 @@ from collections.abc import Callable
 from app.browser.page_loader import BrowserJob, BrowserPage, load_page
 from app.browser.session import BrowserSession, SessionFactory
 from app.errors import RenderTimeoutError, ServiceError
+from app.scraping.clearance import ClearanceStore
+from app.timing import Phase
 
 log = logging.getLogger("render.browser")
 
@@ -24,8 +26,15 @@ Clock = Callable[[], float]
 class BrowserWorker:
     """Owns at most one ``BrowserSession`` at a time; not safe for concurrent renders."""
 
-    def __init__(self, factory: SessionFactory, clock: Clock = time.monotonic):
+    def __init__(
+        self,
+        factory: SessionFactory,
+        clearance: ClearanceStore | None = None,
+        clock: Clock = time.monotonic,
+    ):
+        """:param clearance: shared clearance cookie store; ``None`` disables reuse."""
         self._factory = factory
+        self._clearance = clearance
         self._settings = factory.settings
         self._clock = clock
         self._session: BrowserSession | None = None
@@ -67,12 +76,13 @@ class BrowserWorker:
         :raises ServiceError: subclasses for navigation, timeout and blocking failures.
         """
         if self.needs_restart:
-            await self.restart()
+            with job.timer.phase(Phase.RESTART):
+                await self.restart()
         session = self._session
         self._pages += 1
         try:
             async with asyncio.timeout(job.timeout_seconds + HARD_DEADLINE_GRACE_SECONDS):
-                return await load_page(session, job)
+                return await load_page(session, job, self._clearance)
         except ServiceError:
             raise
         except TimeoutError as exc:

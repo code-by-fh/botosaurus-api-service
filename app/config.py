@@ -4,6 +4,7 @@ Every setting has a documented default (see README). Invalid values raise
 ``ConfigError`` so the service fails fast instead of running misconfigured.
 """
 
+import ipaddress
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -24,6 +25,17 @@ DEFAULT_TIMEZONE = "Europe/Berlin"
 TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSY_VALUES = frozenset({"0", "false", "no", "off", ""})
 PROXY_SCHEMES = frozenset({"http", "https", "socks5", "socks5h"})
+DEFAULT_VNC_PORT = 6080
+# Below the 300 s immunity that challenge vendors typically grant a solved
+# token, so a stored token is dropped before the vendor stops accepting it.
+DEFAULT_CLEARANCE_MAX_AGE_SECONDS = 240.0
+MIN_CLEARANCE_MAX_AGE_SECONDS = 1
+# Tokens older than an hour are almost always expired or re-validated by the
+# vendor; allowing more would only keep stale tokens around.
+MAX_CLEARANCE_MAX_AGE_SECONDS = 3600
+MAX_TCP_PORT = 65535
+
+IpNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 
 class ConfigError(ValueError):
@@ -66,6 +78,24 @@ class HttpFirstSettings:
 
 
 @dataclass(frozen=True)
+class AccessSettings:
+    """Which interactive endpoints are exposed and whom to trust for client addresses."""
+
+    docs_enabled: bool
+    vnc_enabled: bool
+    vnc_port: int
+    trusted_proxies: tuple[IpNetwork, ...]
+
+
+@dataclass(frozen=True)
+class ClearanceSettings:
+    """Reuse of anti-bot clearance cookies between browser renders."""
+
+    enabled: bool
+    max_age_seconds: float
+
+
+@dataclass(frozen=True)
 class Settings:
     """Complete, validated service configuration."""
 
@@ -74,8 +104,8 @@ class Settings:
     queue: QueueSettings
     http_first: HttpFirstSettings
     allow_private_targets: bool
-    vnc_enabled: bool
-    novnc_prefix: str | None = None
+    access: AccessSettings
+    clearance: ClearanceSettings
 
 
 class _EnvReader:
@@ -177,6 +207,41 @@ def _read_http_first(reader: _EnvReader) -> HttpFirstSettings:
     )
 
 
+def _read_trusted_proxies(reader: _EnvReader) -> tuple[IpNetwork, ...]:
+    raw = reader.text("TRUSTED_PROXY_IPS") or ""
+    entries = [entry.strip() for entry in raw.split(",") if entry.strip()]
+    try:
+        return tuple(ipaddress.ip_network(entry, strict=False) for entry in entries)
+    except ValueError as exc:
+        message = f"TRUSTED_PROXY_IPS must list IP addresses or CIDR ranges: {exc}"
+        raise ConfigError(message) from exc
+
+
+def _read_access(reader: _EnvReader) -> AccessSettings:
+    vnc_port = reader.integer("VNC_PORT", DEFAULT_VNC_PORT, 1)
+    if vnc_port > MAX_TCP_PORT:
+        raise ConfigError(f"VNC_PORT must be <= {MAX_TCP_PORT}, got {vnc_port}")
+    return AccessSettings(
+        docs_enabled=reader.flag("ENABLE_DOCS", False),
+        vnc_enabled=reader.flag("ENABLE_VNC", False),
+        vnc_port=vnc_port,
+        trusted_proxies=_read_trusted_proxies(reader),
+    )
+
+
+def _read_clearance(reader: _EnvReader) -> ClearanceSettings:
+    max_age = reader.number(
+        "CLEARANCE_MAX_AGE_SECONDS",
+        DEFAULT_CLEARANCE_MAX_AGE_SECONDS,
+        MIN_CLEARANCE_MAX_AGE_SECONDS,
+    )
+    if max_age > MAX_CLEARANCE_MAX_AGE_SECONDS:
+        raise ConfigError(
+            f"CLEARANCE_MAX_AGE_SECONDS must be <= {MAX_CLEARANCE_MAX_AGE_SECONDS}, got {max_age}"
+        )
+    return ClearanceSettings(enabled=reader.flag("CLEARANCE_REUSE", True), max_age_seconds=max_age)
+
+
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     """Build validated settings from ``env`` (defaults to ``os.environ``).
 
@@ -189,6 +254,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         queue=_read_queue(reader),
         http_first=_read_http_first(reader),
         allow_private_targets=reader.flag("ALLOW_PRIVATE_TARGETS", False),
-        vnc_enabled=reader.flag("ENABLE_VNC", False),
-        novnc_prefix=reader.text("NOVNC_PREFIX"),
+        access=_read_access(reader),
+        clearance=_read_clearance(reader),
     )

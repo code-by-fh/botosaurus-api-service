@@ -19,6 +19,7 @@ MAX_SELECTOR_LENGTH = 500
 MIN_TIMEOUT_SECONDS = 5
 MAX_TIMEOUT_SECONDS = 120
 DEFAULT_TIMEOUT_SECONDS = 30
+MAX_WAIT_FOR_SETTLE_SECONDS = 10
 
 TargetUrl = Annotated[
     HttpUrl, UrlConstraints(max_length=MAX_URL_LENGTH, allowed_schemes=["http", "https"])
@@ -77,10 +78,30 @@ class RenderRequest(BaseModel):
         ),
     )
 
+    wait_for_settle: float | None = Field(
+        default=None,
+        ge=0,
+        le=MAX_WAIT_FOR_SETTLE_SECONDS,
+        description=(
+            "Requires `wait_for`. Browser only. Seconds the `wait_for` element must "
+            "stay present on the loaded page before a page whose content keeps "
+            "changing is returned (default 3). Smaller values return sooner but may "
+            "cut off content still being appended after the element appeared; `0` "
+            "returns as soon as the element is there on a loaded page without a "
+            "challenge. A page that settles earlier is returned earlier anyway."
+        ),
+    )
+
     @model_validator(mode="after")
     def _idle_timeout_needs_wait_for(self) -> "RenderRequest":
         if self.idle_timeout is not None and self.wait_for is None:
             raise ValueError("idle_timeout requires wait_for")
+        return self
+
+    @model_validator(mode="after")
+    def _wait_for_settle_needs_wait_for(self) -> "RenderRequest":
+        if self.wait_for_settle is not None and self.wait_for is None:
+            raise ValueError("wait_for_settle requires wait_for")
         return self
 
     @field_validator("wait_for", "selector")

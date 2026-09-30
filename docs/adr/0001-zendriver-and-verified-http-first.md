@@ -8,7 +8,7 @@
 The service must render arbitrary pages completely and avoid bot detection. Many client apps
 use it, and it runs on a small VPS (Hetzner CX-class). Several problems had come up:
 
-- botasaurus-driver releases slowly, and its PyPI builds do not match the published source.
+- The previous driver releases slowly, and its PyPI builds do not match the published source.
 - Reusing one browser forever degrades its performance.
 - Cookies were shared across all clients.
 - Blocking images and CSS by default is itself a detection signal.
@@ -19,9 +19,9 @@ pages for sites that render with JavaScript, and that is not acceptable for call
 ## Decision
 
 1. **Browser engine: zendriver.** It drives real Google Chrome over CDP, without WebDriver, like
-   botasaurus and nodriver do. Unlike those it is actively maintained, its source is transparent,
-   and it supports a proxy per browser context. Every request gets a fresh browser context.
-   Browsers are recycled after `BROWSER_MAX_PAGES` renders or `BROWSER_MAX_AGE_SECONDS`.
+   the previous driver and nodriver do. Unlike those it is actively maintained, its source is
+   transparent, and it supports a proxy per browser context. Every request gets a fresh browser
+   context (ADR 0003 carries allow-listed anti-bot clearance cookies over between contexts). Browsers are recycled after `BROWSER_MAX_PAGES` renders or `BROWSER_MAX_AGE_SECONDS`.
 2. **HTTP fast path, gated by evidence rather than heuristics alone.**
    - curl_cffi with Chrome impersonation is used only for site sections (host, first path segment
      and path depth) where `VERDICT_MIN_SAMPLES` different URLs passed a comparison against a
