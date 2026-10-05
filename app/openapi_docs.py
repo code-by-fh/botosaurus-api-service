@@ -19,6 +19,8 @@ from app.scraping.scraper import (
     PROFILE_COLD,
     PROFILE_LEARNED,
     PROFILE_NOT_APPLICABLE,
+    ROUTE_DIRECT,
+    ROUTE_PROXY,
     VERIFIED_HTTP_READY_REASON,
 )
 from app.security_headers import SECURITY_HEADERS
@@ -96,6 +98,14 @@ RENDER_SUCCESS_HEADERS = {
         "(section unknown, default behaviour), `n/a` for the HTTP fast path.",
         {"type": "string", "enum": [PROFILE_COLD, PROFILE_LEARNED, PROFILE_NOT_APPLICABLE]},
     ),
+    "X-Render-Route": _header(
+        "Egress route the content came through: `direct` (the server's own IP) or `proxy` "
+        "(HOME_PROXY). `proxy` either because the request set `use_proxy`, because the "
+        "direct route was blocked by bot protection and the service retried through "
+        "HOME_PROXY (`AUTO_PROXY_ON_BLOCK`), or because the host needed HOME_PROXY before "
+        "and is still remembered.",
+        {"type": "string", "enum": [ROUTE_DIRECT, ROUTE_PROXY]},
+    ),
     "X-Final-Url": _header("URL after all redirects, percent-encoded."),
     "X-Upstream-Status": _header(
         "HTTP status the target returned for the main document (`0` if unknown). Error pages "
@@ -163,7 +173,8 @@ RENDER_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     502: _error(
         "`NAVIGATION_FAILED` (DNS, connection or TLS failure, a redirect to a forbidden "
         "address, or a page that could not be read), `TARGET_BLOCKED` (an anti-bot "
-        "challenge did not resolve) or "
+        "challenge did not resolve; with HOME_PROXY and `AUTO_PROXY_ON_BLOCK`, also not "
+        "on the automatic retry through HOME_PROXY) or "
         "`RESPONSE_TOO_LARGE` (the rendered page exceeds `MAX_RESPONSE_BYTES` characters)."
     ),
     504: _error(

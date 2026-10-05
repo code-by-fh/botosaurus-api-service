@@ -40,6 +40,8 @@ class Note(Enum):
     INFLIGHT_IGNORED = "inflight_ignored"
     CLEARANCE = "clearance"
     BLOCKED = "blocked"
+    ROUTE = "route"
+    ESCALATED = "escalated"
     PROFILE = "profile"
     MIN_READY_MS = "min_ready_ms"
 

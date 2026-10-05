@@ -18,7 +18,8 @@ from app.fetch.http_fetcher import HttpFetcher
 from app.scraping.clearance import ClearanceStore
 from app.scraping.host_limiter import HostLimiter
 from app.scraping.profiles import ChanceSource, ProfilePolicy, SectionProfileStore
-from app.scraping.scraper import Scraper, ScraperComponents
+from app.scraping.proxy_hosts import ProxyHostStore
+from app.scraping.scraper import EscalationPolicy, Scraper, ScraperComponents, ScraperPolicy
 from app.scraping.verdicts import VerdictPolicy, VerdictStore
 from app.scraping.verifier import (
     HttpVerifier,
@@ -85,6 +86,7 @@ class Runtime:
     verifier: HttpVerifier
     clearance: ClearanceStore | None
     profiles: SectionProfileStore
+    proxy_hosts: ProxyHostStore
 
     async def close(self) -> None:
         """Stop background verification, observations, browsers, HTTP and egress proxies.
@@ -142,11 +144,19 @@ async def _assemble(
     services = LoadServices(clearance, adapters.clock, settings.http_first.max_response_bytes)
     pool = await _start_pool(settings, factory, services)
     profiles = _profile_store(settings, adapters)
-    components = ScraperComponents(
-        guard, egress, pool, fetcher, verdicts, verifier, limiter, profiles, adapters.clock
+    proxy_hosts = ProxyHostStore(settings.auto_proxy.ttl_seconds, adapters.clock)
+    scraping = (verdicts, verifier, limiter, profiles, proxy_hosts)
+    components = ScraperComponents(guard, egress, pool, fetcher, *scraping, adapters.clock)
+    scraper = Scraper(components, _scraper_policy(settings))
+    return Runtime(
+        scraper, egress, pool, fetcher, verdicts, verifier, clearance, profiles, proxy_hosts
     )
-    scraper = Scraper(components, settings.http_first.enabled)
-    return Runtime(scraper, egress, pool, fetcher, verdicts, verifier, clearance, profiles)
+
+
+def _scraper_policy(settings: Settings) -> ScraperPolicy:
+    config = settings.auto_proxy
+    escalation = EscalationPolicy(config.enabled, config.challenge_seconds)
+    return ScraperPolicy(settings.http_first.enabled, escalation)
 
 
 def _verdict_store(settings: Settings, adapters: Adapters) -> VerdictStore:

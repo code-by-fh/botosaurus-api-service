@@ -56,6 +56,12 @@ def test_health_detail_reports_clearance_entry_count_only(client):
     assert response.json()["clearance"] == {"enabled": True, "entries": 0}
 
 
+def test_health_detail_reports_remembered_proxy_host_count(client):
+    response = client.get("/health/detail", headers=AUTH)
+
+    assert response.json()["proxy_hosts"] == {"entries": 0}
+
+
 def test_health_detail_reports_profile_entry_count(client):
     client.post(RENDER_PATH, json={"url": TARGET_URL}, headers=AUTH)
 
@@ -76,6 +82,7 @@ def test_render_returns_html_with_engine_headers(client):
     assert response.headers["x-render-profile"] == "cold"
     assert response.headers["x-final-url"] == TARGET_URL
     assert response.headers["x-upstream-status"] == "200"
+    assert response.headers["x-render-route"] == "direct"
 
 
 def test_non_ascii_final_url_is_percent_encoded():
@@ -209,6 +216,7 @@ def test_openapi_documents_render_headers_and_error_envelope(client):
         "X-Render-Stable",
         "X-Render-Ready-Reason",
         "X-Render-Profile",
+        "X-Render-Route",
         "X-Final-Url",
         "X-Upstream-Status",
         "X-Request-ID",
@@ -250,7 +258,7 @@ def test_successful_render_logs_one_timing_line_with_trace_id(client, caplog):
         f"Render timing traceId=trace-timing url={TARGET_URL} outcome=ok engine=browser "
     )
     keys = ("queue_ms=", "readiness_ms=", "output_ms=", "total_ms=", "readiness_end=settled")
-    for key in (*keys, "quiet_ms=", "inflight_ignored=0"):
+    for key in (*keys, "quiet_ms=", "inflight_ignored=0", "route=direct", "escalated=false"):
         assert key in line
 
 

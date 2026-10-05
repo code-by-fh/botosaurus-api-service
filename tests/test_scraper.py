@@ -444,6 +444,8 @@ async def test_browser_render_records_each_phase_in_order():
     assert timer.durations_ms()["queue"] == 1000
     assert timer.notes() == {
         "blocked": "none",
+        "route": "direct",
+        "escalated": "false",
         "profile": "cold",
         "min_ready_ms": "0",
         "readiness_end": "settled",
@@ -465,7 +467,7 @@ async def test_verified_http_result_records_only_the_http_phase():
 
     assert result.engine == "http"
     assert list(timer.durations_ms()) == ["host_wait", "http", "total"]
-    assert timer.notes() == {"blocked": "none"}
+    assert timer.notes() == {"blocked": "none", "route": "direct", "escalated": "false"}
 
 
 @pytest.mark.anyio

@@ -32,7 +32,12 @@ from app.content.completeness import (
     HUMAN_VERIFICATION_PATTERN,
     INTERSTITIAL_MAX_TEXT_CHARS,
 )
-from app.errors import NavigationError, RenderTimeoutError, TargetBlockedError
+from app.errors import (
+    ChallengePersistedError,
+    NavigationError,
+    RenderTimeoutError,
+    TargetBlockedError,
+)
 from tests.fakes import (
     NAVIGATED,
     POLL_STEP_SECONDS,
@@ -475,6 +480,67 @@ async def test_unresolved_challenge_at_deadline_is_blocked_and_counts_polls():
 
     assert waiter.end is ReadinessEnd.CHALLENGE
     assert waiter.challenge_polls == tab.calls
+
+
+# --- giving up on a persistent challenge (automatic proxy escalation) ---------------------
+
+CHALLENGE_PATIENCE_SECONDS = 2.0
+
+
+def patient_target(patience: float | None = CHALLENGE_PATIENCE_SECONDS) -> WaitTarget:
+    return WaitTarget(None, LONG_BUDGET_SECONDS, challenge_patience_seconds=patience)
+
+
+@pytest.mark.anyio
+async def test_challenge_that_persists_for_the_patience_ends_the_wait_early():
+    tab = ScriptedTab([stable_probe(challenge=True)])
+    waiter = waiter_for(tab, patient_target())
+
+    with pytest.raises(ChallengePersistedError):
+        await waiter.wait()
+
+    assert waiter.end is ReadinessEnd.CHALLENGE_PERSISTED
+    # The first poll saw the challenge; the patience counts from there.
+    assert elapsed(tab) == pytest.approx(POLL_STEP_SECONDS + CHALLENGE_PATIENCE_SECONDS)
+
+
+def test_persisted_challenge_is_a_target_block():
+    assert issubclass(ChallengePersistedError, TargetBlockedError)
+
+
+@pytest.mark.anyio
+async def test_challenge_that_clears_within_the_patience_lets_the_page_settle():
+    challenge = [stable_probe(challenge=True)] * (polls_at(CHALLENGE_PATIENCE_SECONDS) - 1)
+    tab = ScriptedTab([*challenge, stable_probe(growth=1)])
+    waiter = waiter_for(tab, patient_target())
+
+    stable = await waiter.wait()
+
+    assert stable is True
+    assert waiter.end is ReadinessEnd.SETTLED
+
+
+@pytest.mark.anyio
+async def test_patience_restarts_when_a_new_challenge_follows_a_cleared_one():
+    almost = [stable_probe(challenge=True)] * (polls_at(CHALLENGE_PATIENCE_SECONDS) - 1)
+    tab = ScriptedTab([*almost, stable_probe(growth=1), *almost, stable_probe(growth=2)])
+    waiter = waiter_for(tab, patient_target())
+
+    stable = await waiter.wait()
+
+    assert stable is True
+
+
+@pytest.mark.anyio
+async def test_without_patience_a_challenge_is_awaited_until_the_deadline():
+    tab = ScriptedTab([stable_probe(challenge=True)])
+    waiter = waiter_for(tab, WaitTarget(None, SHORT_BUDGET_SECONDS))
+
+    with pytest.raises(TargetBlockedError) as blocked:
+        await waiter.wait()
+
+    assert type(blocked.value) is TargetBlockedError
+    assert elapsed(tab) == pytest.approx(SHORT_BUDGET_SECONDS)
 
 
 # --- deadline and wait_for ----------------------------------------------------------------

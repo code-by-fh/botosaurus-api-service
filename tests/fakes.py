@@ -224,6 +224,9 @@ class FakePage:
     size_check_fails: bool = False
     # Page.navigate never commits, like a server that withholds its first byte.
     navigation_hangs: bool = False
+    # What a tab whose context goes through the HOME_PROXY egress sees instead (``None``:
+    # the same page on both routes), like a site that blocks only the datacenter IP.
+    via_proxy: "FakePage | None" = None
 
     def probe_at(self, index: int) -> dict:
         return self.probes[min(index, len(self.probes) - 1)]
@@ -259,10 +262,11 @@ async def _finish_command(command, respond):
 class FakeTab(CdpEvents):
     """Answers the CDP commands zendriver sends, the way Chrome would."""
 
-    def __init__(self, browser: "FakeBrowser", context_id: str):
+    def __init__(self, browser: "FakeBrowser", context_id: str, proxied: bool = False):
         super().__init__()
         self._browser = browser
         self.context_id = context_id
+        self.proxied = proxied
         self.target = SimpleNamespace(browser_context_id=cdp.browser.BrowserContextID(context_id))
         self.url = "about:blank"
         self._probe_count = 0
@@ -285,7 +289,7 @@ class FakeTab(CdpEvents):
         return {}
 
     async def _evaluation(self, expression: str) -> dict:
-        page = self._browser.page_for(self.url)
+        page = self._browser.page_for(self.url, self.proxied)
         if expression == HTML_LENGTH_SCRIPT:
             return self._html_length(page)
         if expression == "location.href":
@@ -302,7 +306,7 @@ class FakeTab(CdpEvents):
 
     async def _navigate(self, request: dict) -> dict:
         self.url = request["params"]["url"]
-        page = self._browser.page_for(self.url)
+        page = self._browser.page_for(self.url, self.proxied)
         if page.navigation_hangs:
             await asyncio.Event().wait()
         self._browser.cookie_jar(self.context_id).extend(page.sets_cookies)
@@ -312,7 +316,7 @@ class FakeTab(CdpEvents):
         return response
 
     async def _next_probe(self) -> dict:
-        page = self._browser.page_for(self.url)
+        page = self._browser.page_for(self.url, self.proxied)
         if page.hangs:
             await asyncio.Event().wait()
         if page.gate is not None and self._probe_count >= page.gate_from_probe:
@@ -328,7 +332,7 @@ class FakeTab(CdpEvents):
         return probe
 
     async def get_content(self) -> str:
-        return self._browser.page_for(self.url).html_after(self._probe_count)
+        return self._browser.page_for(self.url, self.proxied).html_after(self._probe_count)
 
     async def aclose(self) -> None:
         self._browser.closed_tabs += 1
@@ -442,9 +446,16 @@ class FakeConnection:
 class FakeBrowser:
     """Minimal stand-in for ``zendriver.Browser``."""
 
-    def __init__(self, pages: dict[str, FakePage], clock: ManualClock | None = None):
+    def __init__(
+        self,
+        pages: dict[str, FakePage],
+        clock: ManualClock | None = None,
+        direct_proxy: str | None = None,
+    ):
         self._pages = pages
         self.clock = clock
+        # The browser-wide proxy (the direct egress); any other context proxy is HOME_PROXY.
+        self.direct_proxy = direct_proxy
         self.connection = FakeConnection(self)
         self.sent_methods: list[str] = []
         # Full requests sent to tabs, so tests can check the parameters Chrome would see.
@@ -464,15 +475,19 @@ class FakeBrowser:
         """The cookies of one browser context, like Chrome keeps them apart."""
         return self.cookie_jars.setdefault(context_id, [])
 
-    def page_for(self, url: str) -> FakePage:
-        return self._pages.get(url, FakePage())
+    def page_for(self, url: str, proxied: bool = False) -> FakePage:
+        page = self._pages.get(url, FakePage())
+        if proxied and page.via_proxy is not None:
+            return page.via_proxy
+        return page
 
     async def create_context(
         self, proxy_server: str | None = None, proxy_bypass_list: list[str] | None = None
     ) -> FakeTab:
         self.context_proxies.append(proxy_server)
         self.context_bypass_lists.append(proxy_bypass_list)
-        tab = FakeTab(self, f"context-{len(self.context_proxies)}")
+        proxied = proxy_server is not None and proxy_server != self.direct_proxy
+        tab = FakeTab(self, f"context-{len(self.context_proxies)}", proxied)
         self.tabs.append(tab)
         return tab
 
@@ -496,7 +511,7 @@ class FakeLauncher:
 
     async def __call__(self, spec) -> FakeBrowser:
         self.specs.append(spec)
-        browser = FakeBrowser(self.pages, self.clock)
+        browser = FakeBrowser(self.pages, self.clock, spec.default_proxy)
         self.launched.append(browser)
         return browser
 

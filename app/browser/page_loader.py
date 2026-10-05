@@ -103,7 +103,12 @@ class RenderLearning(Protocol):
 
 @dataclass(frozen=True)
 class BrowserJob:
-    """What to render and how; ``hints`` are the learned floors of the section."""
+    """What to render and how; ``hints`` are the learned floors of the section.
+
+    ``challenge_patience_seconds`` is handed to the readiness wait (``WaitTarget``): set,
+    a challenge shown that long ends the render with ``ChallengePersistedError`` before
+    the deadline.
+    """
 
     url: str
     wait_for: str | None
@@ -113,6 +118,7 @@ class BrowserJob:
     timer: PhaseTimer = field(default_factory=PhaseTimer, compare=False, repr=False)
     hints: ReadinessHints = COLD
     learning: RenderLearning | None = field(default=None, compare=False, repr=False)
+    challenge_patience_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -266,7 +272,8 @@ async def _load_and_wait(
         await _navigate(tab, job.url, job.timeout_seconds - (options.activity.now() - started))
     remaining = job.timeout_seconds - (options.activity.now() - started)
     budget = max(remaining, MIN_READINESS_BUDGET_SECONDS)
-    waiter = ReadinessWaiter(tab, WaitTarget(job.wait_for, budget, job.hints), options)
+    target = WaitTarget(job.wait_for, budget, job.hints, job.challenge_patience_seconds)
+    waiter = ReadinessWaiter(tab, target, options)
     stable = await _await_readiness(waiter, job.timer)
     if not stable:
         log.warning("Content of %s was still changing at the deadline", loggable_url(job.url))
@@ -350,7 +357,8 @@ async def load_page(
         could not be read.
     :raises RenderTimeoutError: if the navigation did not commit in time, or
         ``job.wait_for`` never appeared.
-    :raises TargetBlockedError: if an anti-bot challenge did not resolve.
+    :raises TargetBlockedError: if an anti-bot challenge did not resolve
+        (``ChallengePersistedError`` if it outlasted ``job.challenge_patience_seconds``).
     """
     services = services or LoadServices()
     with job.timer.phase(Phase.CONTEXT):

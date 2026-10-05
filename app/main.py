@@ -116,6 +116,7 @@ async def _respond(body: RenderRequest, result: ScrapeResult, timer: PhaseTimer)
         "X-Render-Stable": str(result.stable).lower(),
         "X-Render-Ready-Reason": result.ready_reason,
         "X-Render-Profile": result.profile,
+        "X-Render-Route": result.route,
         "X-Final-Url": quote(_without_userinfo(result.final_url), safe=URL_SAFE_CHARACTERS),
         "X-Upstream-Status": str(result.upstream_status),
     }
@@ -142,6 +143,7 @@ def _health_details(runtime: Runtime) -> dict:
         "verdicts": runtime.verdicts.counts(),
         "clearance": _clearance_stats(runtime.clearance),
         "profiles": {"entries": runtime.profiles.count()},
+        "proxy_hosts": {"entries": runtime.proxy_hosts.count()},
     }
 
 
@@ -154,7 +156,10 @@ def _health_router(authenticator: Authenticator) -> APIRouter:
 
     @router.get(
         "/health/detail",
-        summary="Pool utilisation, learned verdicts and profiles, stored clearance count",
+        summary=(
+            "Pool utilisation, learned verdicts and profiles, stored clearance count, "
+            "hosts remembered as needing HOME_PROXY"
+        ),
         dependencies=[Depends(bearer_guard(authenticator))],
         responses=AUTH_RESPONSES,
     )

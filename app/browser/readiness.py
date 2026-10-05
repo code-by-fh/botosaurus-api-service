@@ -55,6 +55,13 @@ profile learns from, and ``late_watch`` continues observing the returned page
 (not after a wait in the main-world fallback, whose growth token cannot tell late
 content from a rotating carousel).
 
+A challenge is awaited until the deadline, unless the caller set
+``WaitTarget.challenge_patience_seconds``: then a challenge still shown that long
+after an observation first saw it (without an observation in between that showed
+none) ends the wait with ``ChallengePersistedError``. The scraper sets it only
+when it can retry the render through HOME_PROXY; this module knows nothing about
+routes.
+
 The deadline decides on the last observation that succeeded: a poll that failed
 because the document was being replaced says nothing about the page. If none
 succeeded, the page could not be read at all (``NavigationError``); a tab that
@@ -88,7 +95,12 @@ from app.content.completeness import (
     INTERSTITIAL_MAX_TEXT_CHARS,
     VERIFICATION_TEXT_TAGS,
 )
-from app.errors import NavigationError, RenderTimeoutError, TargetBlockedError
+from app.errors import (
+    ChallengePersistedError,
+    NavigationError,
+    RenderTimeoutError,
+    TargetBlockedError,
+)
 
 log = logging.getLogger("render.browser")
 
@@ -264,6 +276,8 @@ class ReadinessEnd(Enum):
     """The budget ran out while the content was still changing."""
     CHALLENGE = "challenge"
     """A challenge was still shown at the deadline."""
+    CHALLENGE_PERSISTED = "challenge-persisted"
+    """A challenge outlasted the render's challenge patience, before the deadline."""
     ELEMENT_MISSING = "element-missing"
     """The ``wait_for`` element had not appeared at the deadline."""
     INTERRUPTED = "interrupted"
@@ -327,11 +341,17 @@ class ContentTiming:
 
 @dataclass(frozen=True)
 class WaitTarget:
-    """What to wait for, for how long, and the learned floors of the section."""
+    """What to wait for, for how long, and the learned floors of the section.
+
+    ``challenge_patience_seconds``, if set, gives up on a challenge that is still shown
+    that long after it was first seen, instead of waiting for the deadline: the caller
+    has a better route to try. ``None`` waits for the deadline.
+    """
 
     wait_for: str | None
     budget_seconds: float
     hints: ReadinessHints = COLD
+    challenge_patience_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -502,6 +522,8 @@ class _Progress:
         self.last_growth = self.started
         self.found_since: float | None = None
         self.interactive_since: float | None = None
+        # Start of the current uninterrupted run of polls that saw a challenge.
+        self.challenge_since: float | None = None
         # Two consecutive identical observations are the least evidence that the page is
         # not changing; a single one says nothing, whatever the quiet window.
         self.confirmed = False
@@ -523,12 +545,21 @@ class _Progress:
         if not state.observed:
             return
         self.last_observed = state
+        self._track_challenge(state, poll.now)
         # The first observation is the baseline, not growth: recording it would put
         # the time navigation took into the largest gap and inflate the quiet window.
         if self.token is not None and state.growth != self.token:
             idle = poll.network.inflight == 0
             self.last_growth = self.activity.record(idle_before=idle)
         self.token = state.growth
+
+    def _track_challenge(self, state: PageState, now: float) -> None:
+        # Only an observation without a challenge ends the run: a failed poll during the
+        # document swap of a solved challenge says nothing about the next document.
+        if not state.challenge:
+            self.challenge_since = None
+        elif self.challenge_since is None:
+            self.challenge_since = now
 
     def _track_loading(self, state: PageState, now: float) -> None:
         if state.ready_state not in (READY_STATE_INTERACTIVE, READY_STATE_COMPLETE):
@@ -590,6 +621,8 @@ class ReadinessWaiter:
             while the content was still changing (``wait_for`` present but the
             DOM never settled, or the budget ran out).
         :raises TargetBlockedError: if a challenge is still shown at the deadline.
+        :raises ChallengePersistedError: if a challenge outlasted
+            ``challenge_patience_seconds``.
         :raises RenderTimeoutError: if ``wait_for`` had not appeared at the deadline.
         :raises NavigationError: if no observation succeeded before the deadline, or
             the tab crashed or was closed.
@@ -607,6 +640,7 @@ class ReadinessWaiter:
             outcome = self._decide(poll, progress)
             if outcome is not None:
                 return outcome
+            self._check_challenge_patience(progress, now)
             if now >= deadline:
                 return self._at_deadline(progress.last_observed)
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
@@ -693,6 +727,16 @@ class ReadinessWaiter:
             return None
         baseline = GrowthBaseline(progress.started, progress.token)
         return LateContentWatch(self._observer, baseline, progress.activity.now)
+
+    def _check_challenge_patience(self, progress: _Progress, now: float) -> None:
+        patience = self._target.challenge_patience_seconds
+        since = progress.challenge_since
+        if patience is None or since is None or now - since < patience:
+            return
+        self.end = ReadinessEnd.CHALLENGE_PERSISTED
+        raise ChallengePersistedError(
+            f"The target kept showing an anti-bot challenge for {patience:.0f}s"
+        )
 
     def _finish(self, end: ReadinessEnd, stable: bool) -> bool:
         self.end = end

@@ -52,6 +52,14 @@ key.
    the host and egress route (`browser/clearance.py`, store in `scraping/clearance.py`, ADR 0003);
    after a render without challenge and status < 400 it harvests them. `readiness.ReadinessWaiter`
    decides when the page is rendered, fed by an `InflightTracker` attached before navigation.
+   **Automatic proxy escalation** (ADR 0008, only with `HOME_PROXY`, `AUTO_PROXY_ON_BLOCK` and a
+   request without `use_proxy`): the direct job carries `challenge_patience_seconds`, so a
+   challenge that persists that long raises `ChallengePersistedError` (a `TargetBlockedError`)
+   early. `Scraper` then renders once more with `use_proxy=True`, no learning and the remaining
+   budget (none below `MIN_READINESS_BUDGET_SECONDS`: original `502`), re-queueing in the pool
+   while keeping the host slot. A proxy success puts the host into `ProxyHostStore`
+   (`scraping/proxy_hosts.py`, TTL): later requests start on `HOME_PROXY`, skip the HTTP fast path
+   and are never verified. `ReadinessWaiter` knows nothing about routes.
 5. In `mode: "auto"` with `HTTP_FIRST_ENABLED`: after a stable status-200 browser render without
    `block_resources` of an `UNKNOWN` section has passed its late-content watch (step 6) without
    growth, `HttpVerifier` fetches the same URL over HTTP in the background and compares the

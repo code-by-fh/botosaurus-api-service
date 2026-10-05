@@ -60,6 +60,16 @@ DEFAULT_PROFILE_TTL_SECONDS = 6 * 60 * 60
 MIN_PROFILE_TTL_SECONDS = 60
 # A week: older timing says little about how the site renders today.
 MAX_PROFILE_TTL_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_AUTO_PROXY_CHALLENGE_SECONDS = 8.0
+# Below 2 s a challenge that solves itself in the browser (most JavaScript checks do) would
+# be abandoned before it had a chance; above a minute nothing is left for the proxy attempt.
+MIN_AUTO_PROXY_CHALLENGE_SECONDS = 2
+MAX_AUTO_PROXY_CHALLENGE_SECONDS = 60
+DEFAULT_AUTO_PROXY_TTL_SECONDS = 6 * 60 * 60
+MIN_AUTO_PROXY_TTL_SECONDS = 60
+# A week, like the profiles: a site's bot protection changes, and the home uplink should not
+# carry a host forever on the strength of one old block.
+MAX_AUTO_PROXY_TTL_SECONDS = 7 * 24 * 60 * 60
 
 IpNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
@@ -132,6 +142,20 @@ class ProfileSettings:
 
 
 @dataclass(frozen=True)
+class AutoProxySettings:
+    """Automatic retry through HOME_PROXY when the direct route is blocked by bot protection.
+
+    ``enabled`` has effect only when HOME_PROXY is set. ``challenge_seconds`` is how long a
+    challenge may persist on the direct route before the service gives up on it;
+    ``ttl_seconds`` how long a host is remembered as needing the proxy.
+    """
+
+    enabled: bool
+    challenge_seconds: float
+    ttl_seconds: float
+
+
+@dataclass(frozen=True)
 class Settings:
     """Complete, validated service configuration."""
 
@@ -143,6 +167,7 @@ class Settings:
     access: AccessSettings
     clearance: ClearanceSettings
     profiles: ProfileSettings
+    auto_proxy: AutoProxySettings
     log_level: str
 
 
@@ -352,6 +377,22 @@ def _read_profiles(reader: _EnvReader) -> ProfileSettings:
     )
 
 
+def _read_auto_proxy(reader: _EnvReader) -> AutoProxySettings:
+    return AutoProxySettings(
+        enabled=reader.flag("AUTO_PROXY_ON_BLOCK", True),
+        challenge_seconds=reader.bounded(
+            "AUTO_PROXY_CHALLENGE_SECONDS",
+            DEFAULT_AUTO_PROXY_CHALLENGE_SECONDS,
+            (MIN_AUTO_PROXY_CHALLENGE_SECONDS, MAX_AUTO_PROXY_CHALLENGE_SECONDS),
+        ),
+        ttl_seconds=reader.bounded(
+            "AUTO_PROXY_TTL_SECONDS",
+            DEFAULT_AUTO_PROXY_TTL_SECONDS,
+            (MIN_AUTO_PROXY_TTL_SECONDS, MAX_AUTO_PROXY_TTL_SECONDS),
+        ),
+    )
+
+
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     """Build validated settings from ``env`` (defaults to ``os.environ``).
 
@@ -367,5 +408,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         access=_read_access(reader),
         clearance=_read_clearance(reader),
         profiles=_read_profiles(reader),
+        auto_proxy=_read_auto_proxy(reader),
         log_level=_read_log_level(reader),
     )

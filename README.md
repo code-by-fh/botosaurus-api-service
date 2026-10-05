@@ -46,6 +46,9 @@ is all most callers need:
 {"url": "https://example.com"}
 ```
 
+[docs/render-request.md](docs/render-request.md) is a compact request reference with a full
+example, the request headers and the response headers.
+
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `url` | string | required | Absolute http(s) URL, at most 2048 characters. |
@@ -59,7 +62,7 @@ behaviour by itself.
 |---|---|---|---|
 | `wait_for` | string | - | Hint: CSS selector that must exist before the page counts as rendered, for content the page loads late. Once it is there, the page is returned within 1 s even if it keeps changing (`X-Render-Stable: false`). A missing element is awaited until `timeout`. Also required in HTTP results. See [Selector limits](#selector-limits). |
 | `mode` | `auto` \| `browser` | `auto` | `auto` uses plain HTTP only where it is verified to be complete. `browser` always uses Chrome. |
-| `use_proxy` | bool | false | Route this request through `HOME_PROXY`. |
+| `use_proxy` | bool | false | Route this request through `HOME_PROXY` from the start. Usually not needed: with `HOME_PROXY` set, a direct render blocked by bot protection is retried through it automatically (see [Automatic proxy escalation](#automatic-proxy-escalation)). |
 | `timeout` | int | 30 | Maximum time in seconds (5-120) the service may spend rendering; it returns as soon as the page is complete. Time spent in the queue is not included. The HTTP fast path may use 30% of it (at most 8 s, all redirects together); a browser render after a failed fast path gets the rest. |
 | `block_resources` | `false` \| list | false | Browser only. Request kinds Chrome skips: a non-empty list without duplicates of `image`, `font`, `media`, `stylesheet`, e.g. `["image", "font"]`. See [Resource blocking](#resource-blocking). |
 
@@ -128,6 +131,7 @@ python -m scripts.update_tracker_domains
 | `X-Render-Stable` | `false` if the content was still changing when it was returned (timeout reached, or `wait_for` present on a page that never settled) |
 | `X-Render-Ready-Reason` | Why the content counted as complete: `settled`, `wait-for-found`, `load-budget-expired` or `deadline` for browser renders (see [Completeness guarantee](#completeness-guarantee)), `verified-http` for the HTTP fast path |
 | `X-Render-Profile` | Whether readiness floors learned from earlier renders of the same site section applied: `learned` (the wait may have been lengthened, never shortened), `cold` (section unknown), `n/a` for the HTTP fast path (see [Learned section profiles](#learned-section-profiles)) |
+| `X-Render-Route` | Egress route the content came through: `direct` (the server's own IP) or `proxy` (`HOME_PROXY`: `use_proxy`, an automatic retry, or a host remembered as needing it; see [Automatic proxy escalation](#automatic-proxy-escalation)) |
 | `X-Final-Url` | URL after redirects, percent-encoded, without credentials |
 | `X-Upstream-Status` | HTTP status the target returned for the main document (`0` if unknown). A 404 page is still returned as content. |
 | `X-Request-ID` | Trace id. Pass your own `X-Request-ID` (1-64 characters of `A-Z a-z 0-9 . _ : -`) to correlate logs; any other value is replaced by a generated id. |
@@ -154,7 +158,7 @@ Every response, including errors (`500` too), also carries `X-Content-Type-Optio
 | 429 | `TOO_MANY_AUTH_FAILURES` | 10 wrong API keys from this client within 5 minutes (all authenticated endpoints); honour `Retry-After` |
 | 500 | `INTERNAL_ERROR` | Unexpected failure; the `traceId` identifies it in the service log |
 | 502 | `NAVIGATION_FAILED` | DNS, connection or TLS failure, a redirect to a forbidden address, or a page that could not be read (its tab crashed, or no observation succeeded before `timeout`) |
-| 502 | `TARGET_BLOCKED` | An anti-bot challenge did not resolve within the timeout |
+| 502 | `TARGET_BLOCKED` | An anti-bot challenge did not resolve within the timeout; with automatic proxy escalation, also not on the retry through `HOME_PROXY` |
 | 502 | `RESPONSE_TOO_LARGE` | The rendered document has more than `MAX_RESPONSE_BYTES` characters |
 | 502 | `VNC_UNAVAILABLE` | `/vnc/app/...`: the in-container noVNC server did not answer |
 | 504 | `TIMEOUT` | `wait_for` never appeared, the target did not start responding within `timeout`, or the browser stopped responding |
@@ -167,7 +171,7 @@ or the `Origin` check fails, and `1011` when noVNC does not answer.
 | Endpoint | Auth | Description |
 |---|---|---|
 | `GET /health` | none | Liveness probe |
-| `GET /health/detail` | Bearer | Pool utilisation (`observing`: workers held by a late-content observation), restarts, learned verdicts, number of learned section profiles (`profiles.entries`) and stored clearance cookies |
+| `GET /health/detail` | Bearer | Pool utilisation (`observing`: workers held by a late-content observation), restarts, learned verdicts, number of learned section profiles (`profiles.entries`), stored clearance cookies and hosts remembered as needing `HOME_PROXY` (`proxy_hosts.entries`) |
 | `GET /vnc` | Basic (password = API key) | noVNC live view page; sets the viewer session cookie. `404` unless `ENABLE_VNC=true` |
 | `GET /vnc/app/{path}` | session cookie or Basic | noVNC files relayed from the container; `404` for unknown or disallowed paths, `502 VNC_UNAVAILABLE` if noVNC does not answer |
 | `WS /vnc/websockify` | session cookie or Basic, same `Origin` | VNC stream relayed from the container |
@@ -296,7 +300,9 @@ Profiles are shared by all clients and held in memory per process.
 
 A challenge page is never returned as content. In the browser the service keeps waiting while a
 challenge is shown, because many challenges solve themselves and reload the page. If it is still
-shown at `timeout`, the request fails with `502 TARGET_BLOCKED`. On the HTTP fast path a
+shown at `timeout`, the request fails with `502 TARGET_BLOCKED`. With `HOME_PROXY` configured,
+a direct render gives up on a challenge earlier and is retried through the proxy (see
+[Automatic proxy escalation](#automatic-proxy-escalation)). On the HTTP fast path a
 challenge sends the request to the browser and makes the section browser-only. A page counts as a challenge when:
 
 - it carries the markup of a known vendor block page (Cloudflare, DataDome, PerimeterX, Akamai,
@@ -336,6 +342,38 @@ site on the same egress route, so the challenge and its reload are not paid agai
 - The cookies are held in memory only, shared by all client apps of the service, and never sent
   over the HTTP fast path. `/health/detail` shows their number, never their values.
 
+### Automatic proxy escalation
+
+Datacenter addresses are challenged by strong bot protection whatever the browser does. With
+`HOME_PROXY` set and `AUTO_PROXY_ON_BLOCK=true` (default), a request that did not set
+`use_proxy` handles a block on its own (ADR 0008):
+
+1. The direct render gives up on a challenge that is still shown `AUTO_PROXY_CHALLENGE_SECONDS`
+   (default 8 s) after it first appeared, instead of waiting for `timeout`. A challenge that
+   solves itself within that time is not affected.
+2. The page is rendered once more through `HOME_PROXY` with what is left of `timeout`. If less
+   than 1 s is left, the request fails with `502 TARGET_BLOCKED` without a retry; such a short
+   request gets the whole `timeout` for the challenge on the direct route, as without escalation.
+   If the proxy render is blocked too, the request fails with `502 TARGET_BLOCKED`.
+3. A host that got through only by proxy is remembered for `AUTO_PROXY_TTL_SECONDS` (default
+   6 hours). Later requests to it go through `HOME_PROXY` from the start and skip the HTTP fast
+   path, because curl_cffi uses the direct route. A successful direct render does not end this;
+   only the lifetime does, after which the host is tried directly again.
+
+Details:
+
+- The response says which route it took (`X-Render-Route: direct|proxy`); the timing log line
+  carries `route=` and `escalated=true|false`.
+- One retry per request at most. The per-host slot is kept across both attempts. The browser is
+  not: the blocked attempt returns it to the pool and the retry queues again like a new request,
+  so a full queue answers `429 SERVICE_BUSY`.
+- Renders through the proxy never verify a section for the HTTP fast path, and the automatic
+  retry teaches no section timing either.
+- Clearance cookies stay per route: a token earned through `HOME_PROXY` is reused only there.
+- Every escalated and remembered render runs over the home connection: its upload bandwidth and
+  its IP address are what the target sees. Set `AUTO_PROXY_ON_BLOCK=false` to use `HOME_PROXY`
+  only for requests with `use_proxy: true`.
+
 ### `wait_for`
 
 If you know an element that only exists once the content you need is loaded, pass it as
@@ -362,7 +400,7 @@ failures, so slow requests can be broken down. Target URLs in this and all other
 scheme, host and path only: credentials are dropped and a query string is replaced by `***`.
 
 ```
-Render timing traceId=4f1c... url=https://example.com/a outcome=ok engine=browser host_wait_ms=0 queue_ms=2 context_ms=41 navigate_ms=1830 readiness_ms=21950 read_ms=64 output_ms=35 total_ms=23930 blocked=none profile=learned min_ready_ms=1300 readiness_end=load-budget-expired challenge_polls=0 quiet_ms=3000 inflight_ignored=37 clearance=none
+Render timing traceId=4f1c... url=https://example.com/a outcome=ok engine=browser host_wait_ms=0 queue_ms=2 context_ms=41 navigate_ms=1830 readiness_ms=21950 read_ms=64 output_ms=35 total_ms=23930 blocked=none route=direct escalated=false profile=learned min_ready_ms=1300 readiness_end=load-budget-expired challenge_polls=0 quiet_ms=3000 inflight_ignored=37 clearance=none
 ```
 
 | Key | Meaning |
@@ -381,9 +419,11 @@ Render timing traceId=4f1c... url=https://example.com/a outcome=ok engine=browse
 | `output_ms` | Selector extraction and Markdown conversion. |
 | `total_ms` | Whole request, including time outside the listed phases. |
 | `blocked` | Request kinds the browser was told to skip, sorted (`font,image`), or `none`. Present once the request passed the URL checks. |
+| `route` | Egress route of the result: `direct` or `proxy`. Sent as `X-Render-Route` when a page is returned. |
+| `escalated` | `true` if the direct render was blocked and retried through `HOME_PROXY` (see [Automatic proxy escalation](#automatic-proxy-escalation)), else `false`. |
 | `profile` | Browser renders only: `learned` if floors learned for the section applied, else `cold` (see [Learned section profiles](#learned-section-profiles)). Sent as `X-Render-Profile`. |
 | `min_ready_ms` | Browser renders only: earliest time after navigation the page could be declared ready (`0` when cold). |
-| `readiness_end` | Why the readiness wait stopped: `settled` (quiet before 60% of `timeout`), `load-budget-expired` (quiet only once network activity was ignored), `wait-for-found` (element present, DOM never settled), `deadline` (still changing at `timeout`), `challenge`, `element-missing`, or `interrupted` (the browser hung). Sent as `X-Render-Ready-Reason` when a page is returned. |
+| `readiness_end` | Why the readiness wait stopped: `settled` (quiet before 60% of `timeout`), `load-budget-expired` (quiet only once network activity was ignored), `wait-for-found` (element present, DOM never settled), `deadline` (still changing at `timeout`), `challenge`, `challenge-persisted` (a challenge outlasted `AUTO_PROXY_CHALLENGE_SECONDS` on the direct route), `element-missing`, or `interrupted` (the browser hung). After an escalation it describes the proxy render. Sent as `X-Render-Ready-Reason` when a page is returned. |
 | `challenge_polls` | Readiness polls that saw an anti-bot challenge, including one that later cleared. |
 | `quiet_ms` | Quiet window of the last readiness poll (500 to 3000; at most 1000 once the `wait_for` element is present, unless the section's learned floor is higher). |
 | `inflight_ignored` | Requests that did not hold the page back: non-content kinds, tracker hosts, long polls and event streams. |
@@ -401,7 +441,10 @@ the load.
 | `API_KEYS` | required | Comma-separated API keys, one per client app, each at least 32 characters and not starting with `CHANGE_ME`. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. `API_KEY` (single key) is still accepted. |
 | `MAX_WORKERS` | `2` | Browser instances. 2 on a CX23 (4 GB / 2 vCPU), 3 on a CX33 (8 GB / 4 vCPU). |
 | `HEADLESS` | `false` | `false`: headed Chrome on Xvfb (harder to detect). `true`: `--headless=new`. |
-| `HOME_PROXY` / `PROXY` | - | Upstream proxy for `use_proxy` requests only: `http://`, `https://`, `socks5://` or `socks5h://` with host and an explicit port (1-65535), credentials allowed; Chrome never sees them. |
+| `HOME_PROXY` / `PROXY` | - | Upstream proxy for `use_proxy` requests and for [automatic proxy escalation](#automatic-proxy-escalation): `http://`, `https://`, `socks5://` or `socks5h://` with host and an explicit port (1-65535), credentials allowed; Chrome never sees them. |
+| `AUTO_PROXY_ON_BLOCK` | `true` | Retry a direct browser render that is blocked by bot protection through `HOME_PROXY` and remember the host (see [Automatic proxy escalation](#automatic-proxy-escalation)). Has effect only when `HOME_PROXY` is set. |
+| `AUTO_PROXY_CHALLENGE_SECONDS` | `8` | How long a challenge may persist on the direct route before the service gives up on it and retries through `HOME_PROXY` (2-60). |
+| `AUTO_PROXY_TTL_SECONDS` | `21600` | How long a host is remembered as needing `HOME_PROXY` (60-604800). |
 | `BROWSER_LOCALE` | `de-DE` | Browser language and `Accept-Language`. Must match the egress IP. |
 | `BROWSER_TIMEZONE` | `Europe/Berlin` | Browser timezone. Must match the egress IP. |
 | `BROWSER_MAX_PAGES` | `150` | Restart a browser after this many renders. |
@@ -464,8 +507,9 @@ Read by `docker-compose.yml` only (from `.env`), not by the service:
 - **Egress IP:** Hetzner addresses are well-known datacenter ranges. Strongly protected sites
   (Cloudflare Bot Management, DataDome, Akamai, ...) challenge them whatever the browser
   fingerprint. For those, set `HOME_PROXY` (for example a proxy at home reached over
-  WireGuard/Tailscale, or an ISP/residential proxy) and send `use_proxy: true`. Make
-  `BROWSER_LOCALE` and `BROWSER_TIMEZONE` match that exit.
+  WireGuard/Tailscale, or an ISP/residential proxy); blocked hosts are then retried through it
+  automatically, or send `use_proxy: true` to start there. Make `BROWSER_LOCALE` and
+  `BROWSER_TIMEZONE` match that exit.
 - **Debug view:** set `ENABLE_VNC=true` and `VNC_PASSWORD`, then visit `https://<your-domain>/vnc`
   (see [Live view (VNC)](#live-view-vnc)).
 
@@ -492,8 +536,8 @@ Read by `docker-compose.yml` only (from `.env`), not by the service:
   by the target. Set `HTTP_FIRST_ENABLED=false` for the most sensitive targets.
 - Chrome runs without its sandbox (`BROWSER_SANDBOX=false`), because containers usually lack the
   user namespaces it needs. The container hardening is the isolation boundary.
-- Verdicts, section profiles and clearance cookies are held in memory and are relearned after a
-  restart.
+- Verdicts, section profiles, clearance cookies and hosts remembered as needing `HOME_PROXY` are
+  held in memory and are relearned after a restart.
 - The failed-login lockout and the VNC session key live in the memory of one process. Running
   several uvicorn workers would split the lockout counters and invalidate cookies across
   workers; the image runs one.
@@ -548,6 +592,7 @@ app/
     learning.py         what one browser render teaches: timing, late content, verification
     profiles.py         learned readiness floors per site section
     clearance.py        store of anti-bot clearance cookies
+    proxy_hosts.py      hosts remembered as needing HOME_PROXY (automatic escalation)
   browser/
     session.py          one Chrome instance (zendriver), launch switches
     pool.py             worker pool with bounded wait queue

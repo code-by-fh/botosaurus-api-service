@@ -26,8 +26,10 @@ Rebuilt on zendriver with a verified HTTP fast path. All entries are relative to
   such redirects inside the browser fail with `502 NAVIGATION_FAILED`.
 - Images and CSS are no longer blocked. `BLOCK_IMAGES_AND_CSS` and `WAIT_FOR_COMPLETE_PAGE_LOAD`
   were removed; blocking is opt-in per request with `block_resources`, e.g. `["image", "font"]`.
-- `HOME_PROXY` is used only for requests with `use_proxy: true` (1.x routed every browser through
-  it). It must be an `http`, `https`, `socks5` or `socks5h` URL with an explicit port.
+- `HOME_PROXY` no longer carries every browser (1.x routed all of them through it). It is used for
+  requests with `use_proxy: true` and, unless `AUTO_PROXY_ON_BLOCK=false`, for renders blocked by
+  bot protection on the direct route. It must be an `http`, `https`, `socks5` or `socks5h` URL
+  with an explicit port.
 - The service refuses to start on invalid configuration: API keys shorter than 32 characters or
   starting with `CHANGE_ME`, unknown `LOG_LEVEL`, non-numeric, `nan`/`inf` or out-of-range numbers,
   a malformed `HOME_PROXY`, or `ENABLE_VNC=true` with `HEADLESS=true`.
@@ -42,8 +44,8 @@ Rebuilt on zendriver with a verified HTTP fast path. All entries are relative to
 - After 10 wrong API keys within 5 minutes, further wrong keys from that client address get
   `429 TOO_MANY_AUTH_FAILURES` with `Retry-After` instead of `401`; a valid key always passes.
   Behind a reverse proxy set `TRUSTED_PROXY_IPS` to the proxy's address.
-- `/health/detail` returns `version`, `pool`, `verdicts`, `clearance` and `profiles` instead of
-  `workers_busy`/`workers_total`.
+- `/health/detail` returns `version`, `pool`, `verdicts`, `clearance`, `profiles` and
+  `proxy_hosts` instead of `workers_busy`/`workers_total`.
 
 ### Added
 
@@ -52,7 +54,7 @@ Rebuilt on zendriver with a verified HTTP fast path. All entries are relative to
   distinct pages matched, every number included; one mismatch makes it browser-only (ADR 0001,
   ADR 0007).
 - Response headers `X-Render-Engine`, `X-Render-Stable`, `X-Render-Ready-Reason`,
-  `X-Render-Profile`, `X-Final-Url`, `X-Upstream-Status` and `X-Request-ID`.
+  `X-Render-Profile`, `X-Render-Route`, `X-Final-Url`, `X-Upstream-Status` and `X-Request-ID`.
 - `block_resources`: `false` (default) or a list of `image`, `font`, `media`, `stylesheet`.
   Anti-bot and captcha vendors are never blocked (ADR 0004).
 - Several API keys (`API_KEYS`, one per client app); `API_KEY` is still accepted.
@@ -63,6 +65,13 @@ Rebuilt on zendriver with a verified HTTP fast path. All entries are relative to
   `502 TARGET_BLOCKED`.
 - Clearance reuse: allow-listed anti-bot clearance cookies are carried to the next render of the
   same site and egress route (`CLEARANCE_REUSE`, `CLEARANCE_MAX_AGE_SECONDS`; ADR 0003).
+- Automatic proxy escalation: with `HOME_PROXY` set, a direct browser render whose challenge
+  persists for `AUTO_PROXY_CHALLENGE_SECONDS` (default 8 s) is rendered once more through
+  `HOME_PROXY` with the remaining `timeout`, and the host is remembered for
+  `AUTO_PROXY_TTL_SECONDS` (default 6 hours) so later requests start on the proxy and skip the
+  HTTP fast path. `X-Render-Route: direct|proxy`, `route=` and `escalated=` in the timing log,
+  and `proxy_hosts.entries` in `/health/detail` show it. `AUTO_PROXY_ON_BLOCK=false` turns it
+  off (ADR 0008).
 - Learned section profiles: per site section the service learns how long content takes,
   including content that appears after a long silence, and makes later renders wait long enough
   (`LATE_CONTENT_OBSERVE_SECONDS`, `PROFILE_OBSERVE_SAMPLE_RATE`, `PROFILE_TTL_SECONDS`;

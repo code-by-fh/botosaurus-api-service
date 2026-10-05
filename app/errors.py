@@ -126,6 +126,14 @@ class TargetBlockedError(ServiceError):
     code = "TARGET_BLOCKED"
 
 
+class ChallengePersistedError(TargetBlockedError):
+    """A challenge outlasted the patience a render was given before its deadline.
+
+    Raised only for renders that may be retried through HOME_PROXY (``scraper``); a
+    render that cannot be retried is answered like any other ``TARGET_BLOCKED``.
+    """
+
+
 class VncUnavailableError(ServiceError):
     """The in-container noVNC server did not answer the proxied request."""
 

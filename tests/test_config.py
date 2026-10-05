@@ -1,6 +1,8 @@
 import pytest
 
 from app.config import (
+    DEFAULT_AUTO_PROXY_CHALLENGE_SECONDS,
+    DEFAULT_AUTO_PROXY_TTL_SECONDS,
     DEFAULT_CLEARANCE_MAX_AGE_SECONDS,
     DEFAULT_LATE_CONTENT_OBSERVE_SECONDS,
     DEFAULT_LOCALE,
@@ -52,6 +54,29 @@ def test_profile_learning_defaults():
     assert settings.profiles.observe_seconds == DEFAULT_LATE_CONTENT_OBSERVE_SECONDS
     assert settings.profiles.sample_rate == DEFAULT_PROFILE_OBSERVE_SAMPLE_RATE
     assert settings.profiles.ttl_seconds == DEFAULT_PROFILE_TTL_SECONDS
+
+
+def test_auto_proxy_defaults():
+    settings = load_settings({"API_KEYS": KEY_ONE})
+
+    assert settings.auto_proxy.enabled is True
+    assert settings.auto_proxy.challenge_seconds == DEFAULT_AUTO_PROXY_CHALLENGE_SECONDS
+    assert settings.auto_proxy.ttl_seconds == DEFAULT_AUTO_PROXY_TTL_SECONDS
+
+
+def test_auto_proxy_can_be_disabled_and_tuned():
+    env = {
+        "API_KEYS": KEY_ONE,
+        "AUTO_PROXY_ON_BLOCK": "false",
+        "AUTO_PROXY_CHALLENGE_SECONDS": "5",
+        "AUTO_PROXY_TTL_SECONDS": "3600",
+    }
+
+    settings = load_settings(env)
+
+    assert settings.auto_proxy.enabled is False
+    assert settings.auto_proxy.challenge_seconds == 5
+    assert settings.auto_proxy.ttl_seconds == 3600
 
 
 def test_late_content_observation_can_be_disabled():
@@ -148,6 +173,11 @@ def test_home_proxy_takes_precedence_over_proxy():
         ("PROFILE_OBSERVE_SAMPLE_RATE", "-0.1", "PROFILE_OBSERVE_SAMPLE_RATE must be >= 0"),
         ("PROFILE_TTL_SECONDS", "59", "PROFILE_TTL_SECONDS must be >= 60"),
         ("PROFILE_TTL_SECONDS", "604801", "PROFILE_TTL_SECONDS must be <= 604800"),
+        ("AUTO_PROXY_ON_BLOCK", "maybe", "AUTO_PROXY_ON_BLOCK must be a boolean"),
+        ("AUTO_PROXY_CHALLENGE_SECONDS", "1", "AUTO_PROXY_CHALLENGE_SECONDS must be >= 2"),
+        ("AUTO_PROXY_CHALLENGE_SECONDS", "61", "AUTO_PROXY_CHALLENGE_SECONDS must be <= 60"),
+        ("AUTO_PROXY_TTL_SECONDS", "59", "AUTO_PROXY_TTL_SECONDS must be >= 60"),
+        ("AUTO_PROXY_TTL_SECONDS", "604801", "AUTO_PROXY_TTL_SECONDS must be <= 604800"),
         (
             "VERDICT_SAME_PAGE_INTERVAL_SECONDS",
             "59",
