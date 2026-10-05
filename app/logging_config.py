@@ -1,7 +1,7 @@
 """Centralized logging configuration.
 
-Log level is controlled via the ``LOG_LEVEL`` environment variable.
-Defaults to ``INFO`` in production; set to ``DEBUG`` for local development.
+The level comes from the validated ``LOG_LEVEL`` setting (see ``app.config``), so
+a typo stops the service at startup instead of silently logging at another level.
 Timestamps are always UTC in ISO 8601, independent of the container timezone.
 
 At DEBUG level, external libraries (zendriver, asyncio) and the Python
@@ -10,7 +10,6 @@ browser lifecycle events appear in the output.
 """
 
 import logging
-import os
 import sys
 import time
 
@@ -20,53 +19,39 @@ _DEBUG_EXTERNAL_LOGGERS = (
     "asyncio",
     "curl_cffi",
 )
+LOG_FORMAT = "%(asctime)s %(levelname)-8s [%(name)s] %(message)s"
+UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
-def setup_logging() -> None:
+def setup_logging(level_name: str) -> None:
     """Configure the ``render`` logger and, at DEBUG level, external ones.
 
-    Called once at import time so every module that does
-    ``logging.getLogger("render.<name>")`` inherits the same
-    level and format automatically.
+    Called once by ``create_app`` so every module that does
+    ``logging.getLogger("render.<name>")`` inherits the same level and format.
+    Repeated calls (tests) change the level but add no second handler.
 
-    At DEBUG level the root logger is also configured so that third-party
-    libraries (zendriver, asyncio, curl_cffi) emit their messages and important
-    events such as browser launch, proxy negotiations and CDP calls become
-    visible.
+    :param level_name: a validated level name (``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``).
     """
-    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+    level = logging.getLevelNamesMapping()[level_name]
+    handler = _stdout_handler()
+    _attach(logging.getLogger("render"), level, handler)
+    if level <= logging.DEBUG:
+        # Proxy negotiations, CDP traffic and browser lifecycle events become visible
+        # only when asked for; in production they are noise.
+        _attach(logging.getLogger(), logging.DEBUG, handler)
+        for name in _DEBUG_EXTERNAL_LOGGERS:
+            _attach(logging.getLogger(name), logging.DEBUG, handler)
 
-    formatter = logging.Formatter(
-        fmt="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
+
+def _stdout_handler() -> logging.Handler:
+    formatter = logging.Formatter(fmt=LOG_FORMAT, datefmt=UTC_TIMESTAMP_FORMAT)
     formatter.converter = time.gmtime
-
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
-
-    render = logging.getLogger("render")
-    render.setLevel(level)
-    # Prevent duplicate handlers on repeated calls (e.g. tests)
-    if not render.handlers:
-        render.addHandler(handler)
-
-    if level <= logging.DEBUG:
-        # At DEBUG, also capture root-level and external library logs so that
-        # proxy negotiations, CDP traffic and browser lifecycle events are
-        # visible without enabling them in production.
-        root = logging.getLogger()
-        root.setLevel(logging.DEBUG)
-        if not root.handlers:
-            root.addHandler(handler)
-
-        for name in _DEBUG_EXTERNAL_LOGGERS:
-            ext = logging.getLogger(name)
-            ext.setLevel(logging.DEBUG)
-            if not ext.handlers:
-                ext.addHandler(handler)
+    return handler
 
 
-# Auto-configure on first import
-setup_logging()
+def _attach(logger: logging.Logger, level: int, handler: logging.Handler) -> None:
+    logger.setLevel(level)
+    if not logger.handlers:
+        logger.addHandler(handler)

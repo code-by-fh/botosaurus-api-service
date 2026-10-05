@@ -8,7 +8,10 @@ rebinding. The direct route connects to exactly the address the guard vetted.
 
 Two routes exist: ``direct`` (the VPS's own IP) and, if ``HOME_PROXY`` is set,
 ``proxied`` (chained to that upstream proxy, credentials included, so Chrome
-never needs to authenticate).
+never needs to authenticate). The upstream proxy is given the vetted IP address,
+never the host name: resolving the name again on its side would let a rebinding
+domain reach the proxy's own network (the home LAN). TLS SNI and the ``Host``
+header travel inside the tunnel or the request, so targets still see the name.
 """
 
 import asyncio
@@ -23,6 +26,7 @@ from zendriver.core.proxy import (
     ProxyError,
     UpstreamProxy,
     copy_stream,
+    format_authority,
     pipe,
     split_authority,
 )
@@ -131,6 +135,28 @@ def _origin_form(request: ProxyRequest, url: urllib.parse.SplitResult) -> str:
     return f"{request.method} {path} {request.version}"
 
 
+async def _tunnel_first(upstream: UpstreamProxy, addresses: list[str], port: int) -> Streams:
+    """Open a tunnel via ``upstream`` to the first vetted address it can reach.
+
+    The upstream may lack a route for one address family (IPv6 at home), so the
+    next address is tried, as the direct route does.
+    """
+    failure: ProxyError | None = None
+    for address in addresses:
+        try:
+            return await upstream.open_tunnel(address, port)
+        except ProxyError as exc:
+            failure = exc
+    raise ProxyError(f"upstream proxy could not reach port {port} of {addresses}: {failure}")
+
+
+def _absolute_form_for(request: ProxyRequest, url: urllib.parse.SplitResult, address: str) -> str:
+    """Request line for an HTTP upstream proxy, naming the vetted address instead of the host."""
+    authority = format_authority(address, url.port or DEFAULT_PORTS["http"])
+    target = urllib.parse.urlunsplit(("http", authority, url.path or "/", url.query, ""))
+    return f"{request.method} {target} {request.version}"
+
+
 async def _connect_first(addresses: list[str], port: int) -> Streams:
     """Connect to the first reachable vetted address (e.g. IPv4 when IPv6 is not routed)."""
     failure: Exception | None = None
@@ -225,7 +251,7 @@ class GuardedProxy:
         addresses = await self._vet(host)
         if self._upstream is not None:
             log.debug("CONNECT %s:%d via upstream proxy %s", host, port, self._upstream.host)
-            return await self._upstream.open_tunnel(host, port)
+            return await _tunnel_first(self._upstream, addresses, port)
         log.debug("CONNECT %s:%d directly to %s", host, port, addresses)
         return await _connect_first(addresses, port)
 
@@ -240,16 +266,25 @@ class GuardedProxy:
         ]
         headers.append(CLOSE_HEADER)
         if self._upstream is not None and not self._upstream.is_socks:
-            await self._vet(url.hostname)
-            streams = await self._upstream.open_connection()
-            request_line = f"{request.method} {request.target} {request.version}"
-            if self._upstream.username or self._upstream.password:
-                headers.append(f"Proxy-Authorization: {self._upstream.authorization}")
+            streams, request_line = await self._via_http_upstream(request, url, headers)
         else:
-            streams = await self._tunnel(url.hostname, url.port or 80)
+            streams = await self._tunnel(url.hostname, url.port or DEFAULT_PORTS["http"])
             request_line = _origin_form(request, url)
         streams[1].write("\r\n".join([request_line, *headers, "", ""]).encode("latin-1"))
         return streams
+
+    async def _via_http_upstream(
+        self, request: ProxyRequest, url: urllib.parse.SplitResult, headers: list[str]
+    ) -> tuple[Streams, str]:
+        """Connect to the HTTP upstream; ``headers`` gains what the upstream needs."""
+        addresses = await self._vet(url.hostname)
+        streams = await self._upstream.open_connection()
+        # The target is addressed by IP, so the host name must reach it through Host.
+        if request.header("host") is None:
+            headers.append(f"Host: {url.netloc.rpartition('@')[2]}")
+        if self._upstream.username or self._upstream.password:
+            headers.append(f"Proxy-Authorization: {self._upstream.authorization}")
+        return streams, _absolute_form_for(request, url, addresses[0])
 
 
 class EgressGateway:

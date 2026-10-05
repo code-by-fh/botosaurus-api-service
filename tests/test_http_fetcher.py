@@ -1,6 +1,7 @@
 """Runs the real curl_cffi fetcher against a local HTTP server."""
 
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -14,6 +15,10 @@ MAX_BYTES = 4096
 LOOPBACK = "127.0.0.1"
 ALIAS_HOST = "localhost"
 REDIRECT_PREFIX = "/redirect-to/"
+SLOW_REDIRECT_PATH = "/slow-redirect"
+# Each hop alone fits the timeout, all hops together do not.
+SLOW_HOP_SECONDS = 0.2
+OVERALL_TIMEOUT_SECONDS = 0.5
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -26,6 +31,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith(REDIRECT_PREFIX):
             self._redirect(self.path.removeprefix(REDIRECT_PREFIX))
+            return
+        if self.path == SLOW_REDIRECT_PATH:
+            time.sleep(SLOW_HOP_SECONDS)
+            self._redirect(SLOW_REDIRECT_PATH)
             return
         if self.path == "/language":
             self._respond(200, "text/html", self.headers.get("Accept-Language", "").encode())
@@ -132,3 +141,15 @@ async def test_connection_failure_is_a_navigation_error(fetcher):
 
     with pytest.raises(NavigationError, match="HTTP fetch failed"):
         await fetcher.fetch(request_for(unused_port, "/page"))
+
+
+@pytest.mark.anyio
+async def test_timeout_bounds_all_redirect_hops_together(fetcher, server_port):
+    request = HttpFetchRequest(
+        f"http://{ALIAS_HOST}:{server_port}{SLOW_REDIRECT_PATH}",
+        timeout_seconds=OVERALL_TIMEOUT_SECONDS,
+        proxy_url=None,
+    )
+
+    with pytest.raises(NavigationError, match="timed out"):
+        await fetcher.fetch(request)

@@ -32,7 +32,42 @@ def test_coverage_is_share_of_reference_words_found_in_candidate():
 
 
 def test_numbers_of_any_length_are_tokens():
-    assert tokens("Preis 49,99 EUR, 3 Stück") == {"preis", "49", "99", "eur", "stück", "3"}
+    assert tokens("Preis 49 EUR, 3 Stück") == {"preis", "49", "eur", "stück", "3"}
+
+
+@pytest.mark.parametrize(
+    "text, number",
+    [
+        ("1.299,99 EUR", "129999"),
+        ("1,299.99 USD", "129999"),
+        ("CHF 1'299.99", "129999"),
+        ("1\u202f299,99 EUR", "129999"),
+    ],
+)
+def test_numbers_with_internal_separators_are_one_token(text, number):
+    assert number in tokens(text)
+
+
+def test_split_parts_of_a_number_do_not_count_as_that_number():
+    browser = "Preis 1.299,99 EUR, Lagerbestand 3, Bewertung 4,5 von 5"
+    http = "Preis wird geladen ... ab 99 Cent, 1 Jahr, 3 Tage, 4 Farben, 299 Bewertungen"
+
+    comparison = compare_texts(browser, http)
+
+    assert comparison.missing_numbers == {"129999", "45", "5"}
+    assert comparison.matches(min_share=0.0) is False
+
+
+def test_a_number_shown_more_often_than_http_contains_it_is_missing():
+    comparison = compare_texts("Price 49 EUR, was 49 EUR", "Price 49 EUR, was EUR")
+
+    assert comparison.missing_numbers == {"49"}
+
+
+def test_same_numbers_with_separators_match():
+    text = "Preis 1.299,99 EUR, Lagerbestand 3, Bewertung 4,5 von 5"
+
+    assert compare_texts(text, text).matches(min_share=1.0) is True
 
 
 def test_missing_number_prevents_a_match_despite_full_word_coverage():
@@ -153,6 +188,25 @@ def test_output_markdown_without_selector_uses_body():
 
     assert output.content.startswith("# Headline")
     assert "Article" not in output.content
+
+
+def test_markdown_drops_the_content_of_scripts_and_styles():
+    html = "<html><body><script>var s=1;</script><style>.a{}</style><p>Hi</p></body></html>"
+
+    output = build_output(html, OutputSpec(selector=None, output_format="markdown"))
+
+    assert output.content == "Hi"
+
+
+def test_markdown_of_a_selected_element_drops_non_visible_content():
+    html = (
+        "<html><body><main><noscript>Enable JS</noscript><template>t</template>"
+        "<svg><text>icon</text></svg><img src='a.png' alt='pic'><p>Hi</p></main></body></html>"
+    )
+
+    output = build_output(html, OutputSpec(selector="main", output_format="markdown"))
+
+    assert output.content == "Hi"
 
 
 def test_output_raises_when_selector_matches_nothing():

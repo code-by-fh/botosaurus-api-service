@@ -40,8 +40,11 @@ Nothing limited how many API keys a client could try.
    With `ENABLE_DOCS=true`, guarded replacements (same Basic scheme) serve Swagger UI, ReDoc,
    the OAuth2 redirect page and the schema; otherwise they answer `404`.
 4. **Failed-login lockout.** Wrong Bearer or Basic keys are counted per client address in a
-   sliding window. After 10 within 5 minutes the address gets `429 TOO_MANY_AUTH_FAILURES` with
-   `Retry-After`, even for a correct key. The state is in memory and capped at 10,000 addresses.
+   sliding window. After 10 within 5 minutes, further wrong keys from that address get
+   `429 TOO_MANY_AUTH_FAILURES` with `Retry-After` instead of `401`. A valid key always passes
+   and is not counted: the lockout must never lock out legitimate clients that share an address
+   with an attacker. Guessing a key is infeasible anyway, because the configuration requires
+   keys of at least 32 characters. The state is in memory and capped at 10,000 addresses.
    The address is the TCP peer; `X-Forwarded-For` counts only when the peer is in
    `TRUSTED_PROXY_IPS`, read from the right, so clients cannot choose their own address.
 5. **Security headers on every response:** `X-Content-Type-Options: nosniff`,
@@ -56,6 +59,7 @@ Nothing limited how many API keys a client could try.
 - A restart invalidates all VNC sessions; users log in again through the browser's Basic dialog.
 - Lockout counters and the session key are per process. The image runs one uvicorn worker;
   several workers would need shared state.
-- Behind a reverse proxy without `TRUSTED_PROXY_IPS`, all clients share one lockout, so one
-  attacker could lock everyone out for up to 5 minutes.
+- Behind a reverse proxy without `TRUSTED_PROXY_IPS`, all clients share one lockout. Because a
+  valid key always passes, an attacker can only make other clients' wrong keys answer `429`
+  instead of `401`; valid clients are never locked out.
 - Transport security still depends on the TLS-terminating proxy.

@@ -140,5 +140,41 @@ def test_article_titled_with_a_verification_phrase_is_not_a_challenge():
     assert detect_challenge(article_page("Are you human? A review of the novel")) is None
 
 
-def test_vendor_challenge_title_counts_regardless_of_page_size():
-    assert detect_challenge(article_page("Just a moment...")) is not None
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Just a moment...",
+        "Attention Required! | Cloudflare",
+        "Access Denied",
+        "Access denied | example.com",
+        "example.com - Access denied",
+        "Pardon Our Interruption",
+        "One more step",
+        "DDoS-Guard",
+    ],
+)
+def test_vendor_challenge_title_of_small_page_is_detected(title):
+    assert detect_challenge(small_page(title)) is not None
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "WordPress Security Checklist 2026",
+        "Just a Moment - Song by X",
+        "Access denied: why it happens and how to fix it",
+        "Attention Required! | A guide to focus",
+    ],
+)
+def test_vendor_phrases_in_titles_of_real_pages_are_not_challenges(title):
+    assert detect_challenge(article_page(title)) is None
+
+
+def test_vendor_phrase_inside_a_longer_title_is_not_a_challenge():
+    assert detect_challenge(small_page("WordPress Security Checklist 2026")) is None
+
+
+def test_vendor_body_marker_counts_regardless_of_page_size():
+    marker = "<script>window._cf_chl_opt = {};</script>"
+
+    assert detect_challenge(article_page("Just a moment...", marker)) is not None

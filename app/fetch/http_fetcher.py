@@ -5,8 +5,9 @@ so that every hop passes the SSRF guard, and response bodies are size-capped.
 Cookies are never persisted, so client apps cannot see each other's sessions.
 """
 
+import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urljoin
 
 from bs4 import UnicodeDammit
@@ -14,6 +15,7 @@ from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.exceptions import RequestException
 
 from app.errors import NavigationError
+from app.log_safety import loggable_url
 from app.url_guard import UrlGuard
 
 log = logging.getLogger("render.http")
@@ -22,6 +24,9 @@ IMPERSONATE_TARGET = "chrome"
 MAX_REDIRECTS = 5
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 HTML_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
+# curl's own timeout of a hop runs this much past the overall deadline, so the
+# deadline (one clear error) always fires first and curl still ends the transfer soon after.
+CURL_TIMEOUT_SLACK_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -43,7 +48,10 @@ class HttpPage:
 
 @dataclass(frozen=True)
 class HttpFetchRequest:
-    """Parameters of a single browserless fetch."""
+    """Parameters of a single browserless fetch.
+
+    ``timeout_seconds`` bounds the whole fetch, all redirect hops together.
+    """
 
     url: str
     timeout_seconds: float
@@ -74,19 +82,34 @@ class HttpFetcher:
     async def fetch(self, request: HttpFetchRequest) -> HttpPage:
         """Fetch ``request.url``, following at most ``MAX_REDIRECTS`` guarded redirects.
 
-        :raises NavigationError: on network errors or too many redirects.
+        :raises NavigationError: on network errors, too many redirects, or when
+            ``request.timeout_seconds`` ran out.
         :raises TargetNotAllowedError: if a redirect points to a forbidden host.
         """
+        deadline = asyncio.get_running_loop().time() + request.timeout_seconds
+        try:
+            async with asyncio.timeout_at(deadline):
+                return await self._follow(request, deadline)
+        except TimeoutError as exc:
+            log.info("HTTP fetch timed out for %s", loggable_url(request.url))
+            raise NavigationError(f"HTTP fetch timed out for {request.url}") from exc
+
+    async def _follow(self, request: HttpFetchRequest, deadline: float) -> HttpPage:
         url = request.url
         for _ in range(MAX_REDIRECTS + 1):
             await self._guard.check(url)
-            page, location = await self._fetch_once(url, request)
+            # curl gets the time left, so a cancelled transfer does not linger in the
+            # session for a full timeout.
+            remaining = max(deadline - asyncio.get_running_loop().time(), 0.0)
+            hop = replace(request, url=url, timeout_seconds=remaining + CURL_TIMEOUT_SLACK_SECONDS)
+            page, location = await self._fetch_once(hop)
             if location is None:
                 return page
             url = urljoin(url, location)
         raise NavigationError(f"Too many redirects for {request.url}")
 
-    async def _fetch_once(self, url: str, request: HttpFetchRequest) -> tuple[HttpPage, str | None]:
+    async def _fetch_once(self, request: HttpFetchRequest) -> tuple[HttpPage, str | None]:
+        url = request.url
         try:
             async with self._session.stream(
                 "GET",
@@ -99,7 +122,7 @@ class HttpFetcher:
                 return await self._read(url, response)
         except RequestException as exc:
             # The curl message can contain proxy addresses; it is logged, not returned.
-            log.info("HTTP fetch failed for %s: %s", url, exc)
+            log.info("HTTP fetch failed for %s: %s", loggable_url(url), exc)
             raise NavigationError(f"HTTP fetch failed for {url}") from exc
 
     async def _read(self, url: str, response) -> tuple[HttpPage, str | None]:

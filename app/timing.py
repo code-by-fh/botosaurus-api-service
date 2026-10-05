@@ -36,7 +36,12 @@ class Note(Enum):
 
     READINESS_END = "readiness_end"
     CHALLENGE_POLLS = "challenge_polls"
+    QUIET_MS = "quiet_ms"
+    INFLIGHT_IGNORED = "inflight_ignored"
     CLEARANCE = "clearance"
+    BLOCKED = "blocked"
+    PROFILE = "profile"
+    MIN_READY_MS = "min_ready_ms"
 
 
 class PhaseTimer:

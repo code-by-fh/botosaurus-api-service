@@ -1,6 +1,6 @@
 # ADR 0001: zendriver as browser engine and a verified HTTP fast path
 
-- Status: accepted
+- Status: accepted, decision 2 amended by ADR 0007
 - Date: 2026-09-28
 
 ## Context
@@ -21,7 +21,8 @@ pages for sites that render with JavaScript, and that is not acceptable for call
 1. **Browser engine: zendriver.** It drives real Google Chrome over CDP, without WebDriver, like
    the previous driver and nodriver do. Unlike those it is actively maintained, its source is
    transparent, and it supports a proxy per browser context. Every request gets a fresh browser
-   context (ADR 0003 carries allow-listed anti-bot clearance cookies over between contexts). Browsers are recycled after `BROWSER_MAX_PAGES` renders or `BROWSER_MAX_AGE_SECONDS`.
+   context (ADR 0003 carries allow-listed anti-bot clearance cookies over between contexts).
+   Browsers are recycled after `BROWSER_MAX_PAGES` renders or `BROWSER_MAX_AGE_SECONDS`.
 2. **HTTP fast path, gated by evidence rather than heuristics alone.**
    - curl_cffi with Chrome impersonation is used only for site sections (host, first path segment
      and path depth) where `VERDICT_MIN_SAMPLES` different URLs passed a comparison against a
@@ -33,7 +34,10 @@ pages for sites that render with JavaScript, and that is not acceptable for call
 3. **All egress goes through a local guarding proxy.** Chrome (every context and the browser
    itself, with Chrome's implicit loopback/link-local bypass removed) and curl_cffi connect only
    through it. It rejects non-public destinations for every connection and pins the vetted
-   address. `HOME_PROXY` is chained behind it.
+   address. `HOME_PROXY` is chained behind it and is given the vetted IP address, never the host
+   name (CONNECT `ip:port`, SOCKS5 with an IP address, plain HTTP with the IP in the request URL
+   and the original `Host`), so it cannot re-resolve a rebinding name into its own network.
+   Targets still see the name through TLS SNI and `Host`, which travel inside the tunnel.
 4. **Verdicts are held in memory.** The service runs as a single instance. Losing verdicts on a
    restart only costs extra browser renders, so external storage such as Redis is not justified
    yet.

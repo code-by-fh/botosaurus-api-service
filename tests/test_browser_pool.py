@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 import app.browser.worker as worker_module
-from app.browser.page_loader import BrowserJob
+from app.browser.blocking import BlockedResource, block_patterns
+from app.browser.page_loader import HTML_LENGTH_SCRIPT, BrowserJob
 from app.browser.pool import BrowserPool
 from app.browser.session import LaunchSpec, SessionFactory, browser_args
 from app.browser.worker import BrowserWorker
@@ -23,7 +24,7 @@ def job(url: str = URL, **changes) -> BrowserJob:
         "wait_for": None,
         "timeout_seconds": 5.0,
         "use_proxy": False,
-        "block_resources": False,
+        "block_resources": frozenset(),
     }
     values.update(changes)
     return BrowserJob(**values)
@@ -67,15 +68,33 @@ async def test_render_returns_dom_and_disposes_context():
     assert browser.closed_tabs == 1
 
 
+def blocked_url_requests(launcher: FakeLauncher) -> list[dict]:
+    commands = launcher.launched[0].tab_commands
+    return [command for command in commands if command["method"] == "Network.setBlockedURLs"]
+
+
 @pytest.mark.anyio
 async def test_resource_blocking_is_only_applied_on_request():
     launcher = FakeLauncher()
     pool = await started_pool(launcher, MAX_WORKERS="1")
 
-    await pool.render(job(block_resources=False))
-    await pool.render(job(block_resources=True))
+    await pool.render(job(block_resources=frozenset()))
+    await pool.render(job(block_resources=frozenset({BlockedResource.IMAGE})))
 
-    assert launcher.launched[0].sent_methods.count("Network.setBlockedURLs") == 1
+    assert len(blocked_url_requests(launcher)) == 1
+
+
+@pytest.mark.anyio
+async def test_resource_blocking_sends_url_patterns_not_deprecated_substrings():
+    launcher = FakeLauncher()
+    pool = await started_pool(launcher, MAX_WORKERS="1")
+    kinds = frozenset({BlockedResource.FONT, BlockedResource.IMAGE})
+
+    await pool.render(job(block_resources=kinds))
+
+    [request] = blocked_url_requests(launcher)
+    expected = block_patterns(kinds)
+    assert request["params"] == {"urlPatterns": [pattern.to_json() for pattern in expected]}
 
 
 @pytest.mark.anyio
@@ -200,6 +219,50 @@ async def test_hanging_browser_times_out_and_is_replaced(monkeypatch):
     await wait_for_recycling(pool)
 
     assert len(launcher.launched) == 2
+
+
+@pytest.mark.anyio
+async def test_server_withholding_its_first_byte_times_out_without_restarting_chrome():
+    tarpit = "https://tarpit.example/"
+    launcher = FakeLauncher({tarpit: FakePage(navigation_hangs=True)})
+    pool = await started_pool(launcher, MAX_WORKERS="1")
+
+    with pytest.raises(RenderTimeoutError, match="did not start responding"):
+        await pool.render(job(tarpit, timeout_seconds=0.05))
+    await pool.render(job())
+
+    assert len(launcher.launched) == 1
+    assert launcher.launched[0].closed_tabs == 2
+
+
+def evaluations(launcher: FakeLauncher) -> list[dict]:
+    commands = launcher.launched[0].tab_commands
+    return [command for command in commands if command["method"] == "Runtime.evaluate"]
+
+
+@pytest.mark.anyio
+async def test_no_evaluation_claims_a_user_gesture():
+    launcher = FakeLauncher()
+    pool = await started_pool(launcher, MAX_WORKERS="1")
+
+    await pool.render(job())
+
+    sent = evaluations(launcher)
+    assert {command["params"]["expression"] for command in sent} >= {"location.href"}
+    assert [command for command in sent if command["params"].get("userGesture")] == []
+
+
+@pytest.mark.anyio
+async def test_document_size_is_measured_in_an_isolated_world():
+    launcher = FakeLauncher()
+    pool = await started_pool(launcher, MAX_WORKERS="1")
+
+    await pool.render(job())
+
+    sent = evaluations(launcher)
+    size_checks = [c for c in sent if c["params"]["expression"] == HTML_LENGTH_SCRIPT]
+    assert len(size_checks) == 1
+    assert "contextId" in size_checks[0]["params"]
 
 
 @pytest.mark.anyio

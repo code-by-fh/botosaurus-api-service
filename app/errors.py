@@ -6,6 +6,7 @@ validation errors additionally carry a per-field ``fields`` list.
 """
 
 import logging
+import re
 import uuid
 
 from fastapi import FastAPI, Request
@@ -13,10 +14,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.security_headers import SECURITY_HEADERS
+
 log = logging.getLogger("render.errors")
 
 TRACE_HEADER = "X-Request-ID"
-MAX_TRACE_ID_LENGTH = 64
+# No spaces, quotes or "=": the trace id is written into key=value log lines and must not
+# be able to forge fields there.
+TRACE_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 STATUS_CODES_BY_HTTP_STATUS = {
     401: "UNAUTHORIZED",
     403: "FORBIDDEN",
@@ -128,6 +133,20 @@ class VncUnavailableError(ServiceError):
     code = "VNC_UNAVAILABLE"
 
 
+class RequestTooLargeError(ServiceError):
+    """The request body exceeds what any valid request needs."""
+
+    status_code = 413
+    code = "REQUEST_TOO_LARGE"
+
+
+class ResponseTooLargeError(ServiceError):
+    """The rendered page is larger than the service returns."""
+
+    status_code = 502
+    code = "RESPONSE_TOO_LARGE"
+
+
 class RenderTimeoutError(ServiceError):
     """The page, or the element in ``wait_for``, did not appear within the timeout."""
 
@@ -144,9 +163,14 @@ def _envelope(code: str, message: str, trace_id: str) -> dict:
     return {"error": {"code": code, "message": message, "traceId": trace_id}}
 
 
-async def _service_error_handler(request: Request, exc: ServiceError) -> JSONResponse:
-    body = _envelope(exc.code, exc.message, trace_id_of(request))
+def error_response(exc: ServiceError, trace_id: str) -> JSONResponse:
+    """The envelope response for ``exc``, with the headers the error requires."""
+    body = _envelope(exc.code, exc.message, trace_id)
     return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers())
+
+
+async def _service_error_handler(request: Request, exc: ServiceError) -> JSONResponse:
+    return error_response(exc, trace_id_of(request))
 
 
 def _field_name(location: tuple) -> str:
@@ -172,15 +196,17 @@ async def _http_error_handler(request: Request, exc: StarletteHTTPException) -> 
 
 
 async def _unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    trace_id = trace_id_of(request)
+    trace_id = trace_id_of(request) or uuid.uuid4().hex
     log.error("Unexpected error (traceId=%s)", trace_id, exc_info=exc)
     body = _envelope("INTERNAL_ERROR", "An unexpected error occurred", trace_id)
-    return JSONResponse(status_code=500, content=body)
+    # Starlette runs this handler outside the HTTP middlewares, so it sets their headers itself.
+    headers = {**SECURITY_HEADERS, TRACE_HEADER: trace_id}
+    return JSONResponse(status_code=500, content=body, headers=headers)
 
 
 def _incoming_trace_id(request: Request) -> str:
     candidate = request.headers.get(TRACE_HEADER, "")
-    if candidate and len(candidate) <= MAX_TRACE_ID_LENGTH and candidate.isascii():
+    if TRACE_ID_PATTERN.fullmatch(candidate):
         return candidate
     return uuid.uuid4().hex
 

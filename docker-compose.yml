@@ -4,29 +4,47 @@ services:
     ports:
       # The only published port. The noVNC debug view (ENABLE_VNC=true) and the
       # API docs (ENABLE_DOCS=true) are served through it, behind authentication.
-      - "8000:8000"
+      # Bound to loopback by default: Docker's port publishing bypasses host firewalls
+      # such as ufw, so 0.0.0.0 would expose the plain-HTTP port to the internet. A
+      # reverse proxy on the same host connects to 127.0.0.1:8000; set API_BIND only
+      # when the proxy runs elsewhere (see README, Deployment).
+      - "${API_BIND:-127.0.0.1}:8000:8000"
     env_file:
       - .env        # API_KEYS (required), HOME_PROXY, VNC_PASSWORD, ...
     environment:
       # Defaults only: a value in .env takes precedence. Values fixed here would
       # override env_file silently.
-      # MAX_WORKERS is sized for a Hetzner CX33 (4 vCPU / 8 GB); use 2 on a CX23.
-      MAX_WORKERS: "${MAX_WORKERS:-3}"
+      # Sized for a Hetzner CX23 (2 vCPU / 4 GB); a CX33 (4 vCPU / 8 GB) takes 3.
+      MAX_WORKERS: "${MAX_WORKERS:-2}"
       HEADLESS: "${HEADLESS:-false}"
       ENABLE_VNC: "${ENABLE_VNC:-false}"
       ENABLE_DOCS: "${ENABLE_DOCS:-false}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     restart: unless-stopped
+    # uvicorn waits up to 30 s (--timeout-graceful-shutdown) for running renders;
+    # Docker's default of 10 s would kill it in the middle of them.
+    stop_grace_period: 40s
     read_only: true
     tmpfs:
       # Chrome profiles, caches and the X11 socket live here. Chrome runs with
-      # --disable-dev-shm-usage, so /tmp replaces /dev/shm and needs the room.
-      - /tmp:size=1g,mode=1777
+      # --disable-dev-shm-usage, so /tmp also replaces /dev/shm. tmpfs pages count
+      # against MEM_LIMIT; 512m covers the shared memory and profiles of 2-3
+      # browsers, which are recycled after BROWSER_MAX_PAGES, and leaves the rest of
+      # the budget to Chrome's processes.
+      - /tmp:size=512m,mode=1777
       - /home/app:size=256m,uid=10001,gid=10001
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    mem_limit: 6g
-    cpus: "3.5"
+    # CX23 defaults, leaving room for the host OS and the reverse proxy. Docker
+    # refuses to start a container whose CPU limit exceeds the host's CPUs.
+    # CX33: MEM_LIMIT=6g, CPU_LIMIT=3.5, MAX_WORKERS=3.
+    mem_limit: "${MEM_LIMIT:-3g}"
+    cpus: "${CPU_LIMIT:-1.8}"
     pids_limit: 2048
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

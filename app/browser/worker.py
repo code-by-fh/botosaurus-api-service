@@ -10,10 +10,9 @@ import logging
 import time
 from collections.abc import Callable
 
-from app.browser.page_loader import BrowserJob, BrowserPage, load_page
+from app.browser.page_loader import BrowserJob, LoadServices, RenderOutcome, load_page
 from app.browser.session import BrowserSession, SessionFactory
 from app.errors import RenderTimeoutError, ServiceError
-from app.scraping.clearance import ClearanceStore
 from app.timing import Phase
 
 log = logging.getLogger("render.browser")
@@ -29,12 +28,17 @@ class BrowserWorker:
     def __init__(
         self,
         factory: SessionFactory,
-        clearance: ClearanceStore | None = None,
+        services: LoadServices | None = None,
         clock: Clock = time.monotonic,
     ):
-        """:param clearance: shared clearance cookie store; ``None`` disables reuse."""
+        """Create an idle worker.
+
+        :param services: shared clearance store and the clock renders are timed on;
+            no clearance reuse and the monotonic clock when omitted.
+        :param clock: decides when the browser is old enough to be replaced.
+        """
         self._factory = factory
-        self._clearance = clearance
+        self._services = services or LoadServices()
         self._settings = factory.settings
         self._clock = clock
         self._session: BrowserSession | None = None
@@ -67,11 +71,13 @@ class BrowserWorker:
         too_old = self._clock() - self._started_at >= self._settings.max_age_seconds
         return too_old or self._pages >= self._settings.max_pages
 
-    async def render(self, job: BrowserJob) -> BrowserPage:
+    async def render(self, job: BrowserJob) -> RenderOutcome:
         """Render ``job``; the browser is flagged for restart on any unexpected failure.
 
         A hard deadline above the job's own timeout catches CDP calls that hang
-        forever, which would otherwise block this slot permanently.
+        forever, which would otherwise block this slot permanently. A lingering tab
+        in the outcome is not covered by it; ``LingeringRender`` has its own limit,
+        and the worker must not render again before it was observed or discarded.
 
         :raises ServiceError: subclasses for navigation, timeout and blocking failures.
         """
@@ -82,7 +88,7 @@ class BrowserWorker:
         self._pages += 1
         try:
             async with asyncio.timeout(job.timeout_seconds + HARD_DEADLINE_GRACE_SECONDS):
-                return await load_page(session, job, self._clearance)
+                return await load_page(session, job, self._services)
         except ServiceError:
             raise
         except TimeoutError as exc:

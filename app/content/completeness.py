@@ -4,10 +4,13 @@ Two kinds of placeholder are recognised:
 
 - **Anti-bot challenges**, which must never be returned as content, whichever
   engine fetched them. Vendor block pages (Cloudflare, DataDome, PerimeterX,
-  Akamai, Imperva) have unambiguous titles and markers and count on their own.
-  Generic interstitials (a "not a robot" title or heading, or the script of a
-  challenge SDK such as AWS WAF, hCaptcha, reCAPTCHA or Turnstile) count only on
-  a page with little visible text; see ``INTERSTITIAL_MAX_TEXT_CHARS``.
+  Akamai, Imperva) have unambiguous body markers, which count on their own.
+  Their titles ("Just a moment...", "Access denied | example.com") count only
+  as the whole title and on a page with little visible text, since the same
+  words open ordinary titles ("Just a Moment - Song by X"). Generic
+  interstitials (a "not a robot" title or heading, or the script of a challenge
+  SDK such as AWS WAF, hCaptcha, reCAPTCHA or Turnstile) count only on a page
+  with little visible text; see ``INTERSTITIAL_MAX_TEXT_CHARS``.
 - **Pages that need JavaScript** to show their content (empty SPA mount points,
   "please enable JavaScript" notices, redirect stubs, near-empty bodies). These
   checks gate the HTTP fast path. They are deliberately strict: a false alarm
@@ -24,9 +27,25 @@ from soupsieve import SelectorSyntaxError
 
 from app.content.text import parse_html, visible_text
 
+CHALLENGE_TITLE_PHRASES = (
+    "just a moment",
+    "attention required",
+    "access denied",
+    "pardon our interruption",
+    "security check",
+    "one more step",
+    "ddos-guard",
+)
+# A site name may precede or follow the phrase, separated by "-", "|", ":" or a dash
+# ("Attention Required! | Cloudflare"); anything else around it ("WordPress Security
+# Checklist") is an ordinary title. The bounded affixes keep matching linear on a
+# page-controlled title of any length.
+TITLE_SEPARATOR = r"\s*[-|:\u2013\u2014]\s*"
+TITLE_AFFIX_MAX_CHARS = 80
 CHALLENGE_TITLE_PATTERN = re.compile(
-    r"just a moment|attention required|access denied|pardon our interruption"
-    r"|security check|one more step|ddos-guard",
+    rf"^\s*(?:[\s\S]{{0,{TITLE_AFFIX_MAX_CHARS}}}?{TITLE_SEPARATOR})?"
+    rf"(?:{'|'.join(CHALLENGE_TITLE_PHRASES)})[.!\u2026]*"
+    rf"(?:{TITLE_SEPARATOR}[\s\S]{{0,{TITLE_AFFIX_MAX_CHARS}}})?\s*$",
     re.IGNORECASE,
 )
 CHALLENGE_BODY_MARKERS = (
@@ -85,13 +104,14 @@ CHALLENGE_SDK_MARKERS = (
 )
 # A challenge interstitial shows a sentence or two, a widget and at most a short
 # footer. A real page that merely embeds one of the SDKs above, or has a
-# verification phrase in a heading, carries navigation, footer and content well
-# beyond this. A false alarm is expensive in the browser (the page is awaited
-# until the timeout and then refused as TARGET_BLOCKED), so the limit only
-# admits pages that cannot plausibly be the requested content.
+# verification or vendor phrase in its title or a heading, carries navigation,
+# footer and content well beyond this. A false alarm is expensive in the browser
+# (the page is awaited until the timeout and then refused as TARGET_BLOCKED), so
+# the limit only admits pages that cannot plausibly be the requested content.
 INTERSTITIAL_MAX_TEXT_CHARS = 1000
 VERIFICATION_TEXT_TAGS = ("title", "h1", "h2")
 TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+TITLE_SEARCH_CHARS = 20000
 SPA_ROOT_SELECTORS = (
     "#root",
     "#app",
@@ -118,14 +138,16 @@ def detect_challenge(html: str) -> str | None:
 
 
 def _vendor_challenge(html: str) -> str | None:
-    title_match = TITLE_PATTERN.search(html[:20000])
-    if title_match and CHALLENGE_TITLE_PATTERN.search(title_match.group(1)):
-        return f"challenge page title: {title_match.group(1).strip()[:80]}"
     lowered = html.lower()
     for marker in CHALLENGE_BODY_MARKERS:
         if marker in lowered:
             return f"challenge marker found: {marker}"
-    return None
+    title_match = TITLE_PATTERN.search(html[:TITLE_SEARCH_CHARS])
+    if not title_match or not CHALLENGE_TITLE_PATTERN.search(title_match.group(1)):
+        return None
+    if len(visible_text(parse_html(html))) >= INTERSTITIAL_MAX_TEXT_CHARS:
+        return None
+    return f"challenge page title: {title_match.group(1).strip()[:80]}"
 
 
 def _interstitial_challenge(html: str) -> str | None:

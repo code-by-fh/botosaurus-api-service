@@ -5,13 +5,16 @@ from typing import Literal
 
 from markdownify import markdownify
 
-from app.content.text import parse_html
+from app.content.text import parse_html, without_non_visible
 from app.errors import ElementNotFoundError
 
 OutputFormat = Literal["html", "markdown"]
 HTML_MEDIA_TYPE = "text/html; charset=utf-8"
 MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8"
-MARKDOWN_STRIPPED_TAGS = ["img", "script", "style"]
+# markdownify's strip keeps the text of a stripped tag, so non-visible elements are
+# removed from the tree before converting (``without_non_visible``); images only
+# lose their tag, and have no text to keep.
+MARKDOWN_STRIPPED_TAGS = ["img"]
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,7 @@ def build_output(html: str, spec: OutputSpec) -> RenderedOutput:
     """
     target = _target_html(html, spec)
     if spec.output_format == "markdown":
-        markdown = markdownify(target, heading_style="ATX", strip=MARKDOWN_STRIPPED_TAGS).strip()
+        visible = str(without_non_visible(parse_html(target)))
+        markdown = markdownify(visible, heading_style="ATX", strip=MARKDOWN_STRIPPED_TAGS).strip()
         return RenderedOutput(markdown, MARKDOWN_MEDIA_TYPE)
     return RenderedOutput(target, HTML_MEDIA_TYPE)

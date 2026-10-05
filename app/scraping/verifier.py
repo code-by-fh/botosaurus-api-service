@@ -1,6 +1,7 @@
 """Background check whether a site section can be served by plain HTTP.
 
-After a browser render of a section with an unknown verdict, the same URL is
+After a browser render of a section with an unknown verdict has passed its
+late-content watch without growing (``scraping.learning``), the same URL is
 fetched once without a browser (after a short random pause, so the two
 requests do not arrive at the same instant) and both visible texts are
 compared. Only if the HTTP document passes every completeness check, contains
@@ -13,12 +14,14 @@ import logging
 import random
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cached_property
 
 from app.browser.page_loader import BrowserPage
 from app.content.completeness import find_incompleteness
 from app.content.text import compare_texts, parse_html, visible_text
 from app.errors import ServiceBusyError, ServiceError
 from app.fetch.http_fetcher import HttpFetcher, HttpFetchRequest
+from app.log_safety import loggable_url
 from app.scraping.host_limiter import HostLimiter
 from app.scraping.verdicts import VerdictStore, section_key
 
@@ -44,18 +47,22 @@ class VerificationSample:
     required_selectors: tuple[str, ...]
     browser_page: BrowserPage
 
+    @cached_property
+    def browser_text(self) -> str:
+        """Visible text of the browser render, parsed once for comparison and recording."""
+        return visible_text(parse_html(self.browser_page.html))
+
 
 def http_matches_browser(http_html: str, sample: VerificationSample, min_coverage: float) -> bool:
     """True if ``http_html`` is complete and covers the browser's visible text."""
     reason = find_incompleteness(http_html, sample.required_selectors)
     if reason:
-        log.info("HTTP result for %s rejected: %s", sample.fetch.url, reason)
+        log.info("HTTP result for %s rejected: %s", loggable_url(sample.fetch.url), reason)
         return False
-    browser_text = visible_text(parse_html(sample.browser_page.html))
-    comparison = compare_texts(browser_text, visible_text(parse_html(http_html)))
+    comparison = compare_texts(sample.browser_text, visible_text(parse_html(http_html)))
     log.info(
         "HTTP vs browser for %s: coverage %.2f, length %.2f, missing numbers %d",
-        sample.fetch.url,
+        loggable_url(sample.fetch.url),
         comparison.coverage,
         comparison.length_ratio,
         len(comparison.missing_numbers),
@@ -110,13 +117,13 @@ class HttpVerifier:
             await asyncio.sleep(self._policy.pause())
             matched = await self._compare(sample)
         except ServiceBusyError:
-            log.info("Verification of %s skipped, host is busy", sample.fetch.url)
+            log.info("Verification of %s skipped, host is busy", loggable_url(sample.fetch.url))
             return
         except Exception:
-            log.error("Verification of %s crashed", sample.fetch.url, exc_info=True)
+            log.error("Verification of %s crashed", loggable_url(sample.fetch.url), exc_info=True)
             return
         if matched:
-            self._verdicts.record_match(key, sample.fetch.url)
+            self._verdicts.record_match(key, sample.fetch.url, sample.browser_text)
         else:
             self._verdicts.record_mismatch(key)
         log.info("Section %s verdict is now %s", key, self._verdicts.get(key).value)
@@ -128,7 +135,11 @@ class HttpVerifier:
         except ServiceBusyError:
             raise
         except ServiceError as exc:
-            log.info("Verification fetch for %s failed: %s", sample.fetch.url, exc.message)
+            log.info(
+                "Verification fetch for %s failed: %s",
+                loggable_url(sample.fetch.url),
+                exc.message,
+            )
             return False
         if not page.is_html_document:
             return False

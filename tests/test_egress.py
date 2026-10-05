@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import ipaddress
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -212,3 +213,92 @@ async def test_next_vetted_address_is_tried_when_first_is_unreachable(target_por
     await gateway.close()
 
     assert b"X-Seen-Path: /fallback" in response
+
+
+VETTED_ADDRESS = "93.184.215.14"
+REBINDING_HOST = "rebind.example"
+SOCKS_IPV4_ADDRESS_TYPE = 1
+SOCKS_GREETING_BYTES = 4
+SOCKS_REQUEST_HEAD_BYTES = 4
+IPV4_BYTES = 4
+PORT_BYTES = 2
+
+
+async def vetted_resolver(host: str) -> list[str]:
+    return [VETTED_ADDRESS]
+
+
+class RecordingUpstream:
+    """Upstream proxy that records what it was asked to connect to, then answers success."""
+
+    def __init__(self, socks: bool = False):
+        self.received = b""
+        self._socks = socks
+        self._server: asyncio.Server | None = None
+
+    async def start(self) -> str:
+        self._server = await asyncio.start_server(self._handle, LOOPBACK, 0)
+        scheme = "socks5" if self._socks else "http"
+        return f"{scheme}://{LOOPBACK}:{self._server.sockets[0].getsockname()[1]}"
+
+    async def _handle(self, reader, writer):
+        answer = self._answer_socks if self._socks else self._answer_http
+        with contextlib.suppress(asyncio.IncompleteReadError, ConnectionError):
+            await answer(reader, writer)
+        writer.close()
+
+    async def _answer_http(self, reader, writer):
+        self.received = await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+
+    async def _answer_socks(self, reader, writer):
+        await reader.readexactly(SOCKS_GREETING_BYTES)
+        writer.write(b"\x05\x00")
+        self.received = await reader.readexactly(SOCKS_REQUEST_HEAD_BYTES + IPV4_BYTES + PORT_BYTES)
+        writer.write(b"\x05\x00\x00\x01" + bytes(IPV4_BYTES + PORT_BYTES))
+        await writer.drain()
+
+    async def close(self):
+        self._server.close()
+
+
+async def via_recording_upstream(upstream: RecordingUpstream, request: bytes) -> bytes:
+    guard = UrlGuard(allow_private=False, resolver=vetted_resolver)
+    gateway = await started_gateway(guard, await upstream.start())
+    await asyncio.wait_for(send_through(gateway.url_for(True), request), 10)
+    await gateway.close()
+    await upstream.close()
+    return upstream.received
+
+
+@pytest.mark.anyio
+async def test_http_upstream_is_asked_to_connect_to_the_vetted_address():
+    request = f"CONNECT {REBINDING_HOST}:443 HTTP/1.1\r\n\r\n".encode()
+
+    received = await via_recording_upstream(RecordingUpstream(), request)
+
+    assert received.startswith(f"CONNECT {VETTED_ADDRESS}:443 HTTP/1.1".encode())
+    assert REBINDING_HOST.encode() not in received
+
+
+@pytest.mark.anyio
+async def test_plain_http_via_http_upstream_names_the_address_and_keeps_the_host():
+    request = f"GET http://{REBINDING_HOST}/page?q=1 HTTP/1.1\r\nHost: {REBINDING_HOST}\r\n\r\n"
+
+    received = await via_recording_upstream(RecordingUpstream(), request.encode())
+
+    assert received.startswith(f"GET http://{VETTED_ADDRESS}:80/page?q=1 HTTP/1.1".encode())
+    assert f"Host: {REBINDING_HOST}".encode() in received
+
+
+@pytest.mark.anyio
+async def test_socks_upstream_gets_the_vetted_ip_not_the_domain():
+    request = f"CONNECT {REBINDING_HOST}:443 HTTP/1.1\r\n\r\n".encode()
+
+    received = await via_recording_upstream(RecordingUpstream(socks=True), request)
+
+    address_type = received[SOCKS_REQUEST_HEAD_BYTES - 1]
+    address = received[SOCKS_REQUEST_HEAD_BYTES : SOCKS_REQUEST_HEAD_BYTES + IPV4_BYTES]
+    assert address_type == SOCKS_IPV4_ADDRESS_TYPE
+    assert address == ipaddress.ip_address(VETTED_ADDRESS).packed

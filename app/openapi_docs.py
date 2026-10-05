@@ -12,7 +12,15 @@ from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
 
 from app.auth_throttle import AUTH_FAILURE_WINDOW_SECONDS, MAX_AUTH_FAILURES
+from app.body_limit import MAX_REQUEST_BODY_BYTES
+from app.browser.readiness import WAIT_FOR_QUIET_CAP_SECONDS, ReadinessEnd
 from app.errors import TRACE_HEADER, ServiceBusyError
+from app.scraping.scraper import (
+    PROFILE_COLD,
+    PROFILE_LEARNED,
+    PROFILE_NOT_APPLICABLE,
+    VERIFIED_HTTP_READY_REASON,
+)
 from app.security_headers import SECURITY_HEADERS
 from app.vnc_session import SESSION_COOKIE_NAME
 
@@ -54,6 +62,15 @@ SECURITY_RESPONSE_HEADERS = {
     for name, value in SECURITY_HEADERS.items()
 }
 
+# Only the ends that return a page; the others raise and produce an error response.
+READY_REASONS = [
+    ReadinessEnd.SETTLED.value,
+    ReadinessEnd.WAIT_FOR_FOUND.value,
+    ReadinessEnd.LOAD_BUDGET_EXPIRED.value,
+    ReadinessEnd.DEADLINE.value,
+    VERIFIED_HTTP_READY_REASON,
+]
+
 RENDER_SUCCESS_HEADERS = {
     "X-Render-Engine": _header(
         "Engine that produced the content: `http` (verified fast path) or `browser` (Chrome).",
@@ -61,8 +78,23 @@ RENDER_SUCCESS_HEADERS = {
     ),
     "X-Render-Stable": _header(
         "`false` if the content was still changing when it was returned (timeout reached, or "
-        "`wait_for` present for `wait_for_settle` seconds on a page that never settled).",
+        "`wait_for` present on a page that never settled).",
         {"type": "string", "enum": ["true", "false"]},
+    ),
+    "X-Render-Ready-Reason": _header(
+        "Why the content was considered complete. Browser renders: `settled` (no content "
+        "request and no DOM growth for the adaptive quiet window), `wait-for-found` "
+        f"(`wait_for` present for {WAIT_FOR_QUIET_CAP_SECONDS:g} s on a page that kept growing), "
+        "`load-budget-expired` (settled only after network activity was ignored), "
+        "`deadline` (timeout reached while content was changing). `verified-http` for the "
+        "HTTP fast path.",
+        {"type": "string", "enum": READY_REASONS},
+    ),
+    "X-Render-Profile": _header(
+        "Whether readiness floors learned from earlier renders of the same site section "
+        "applied: `learned` (the wait may have been lengthened, never shortened), `cold` "
+        "(section unknown, default behaviour), `n/a` for the HTTP fast path.",
+        {"type": "string", "enum": [PROFILE_COLD, PROFILE_LEARNED, PROFILE_NOT_APPLICABLE]},
     ),
     "X-Final-Url": _header("URL after all redirects, percent-encoded."),
     "X-Upstream-Status": _header(
@@ -98,7 +130,8 @@ UNAUTHORIZED_RESPONSE = _error(
 
 AUTH_THROTTLED_DESCRIPTION = (
     f"`TOO_MANY_AUTH_FAILURES`: {MAX_AUTH_FAILURES} wrong API keys from this client within "
-    f"{AUTH_FAILURE_WINDOW_SECONDS // 60} minutes; every request is refused until `Retry-After`."
+    f"{AUTH_FAILURE_WINDOW_SECONDS // 60} minutes; further wrong keys are refused until "
+    "`Retry-After`. A valid key always passes."
 )
 
 AUTH_RESPONSES: dict[int | str, dict[str, Any]] = {
@@ -113,6 +146,10 @@ RENDER_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     ),
     401: UNAUTHORIZED_RESPONSE,
     404: _error("`ELEMENT_NOT_FOUND`: `selector` matched nothing in the rendered page."),
+    413: _error(
+        f"`REQUEST_TOO_LARGE`: request body over {MAX_REQUEST_BODY_BYTES} bytes; refused "
+        "before authentication."
+    ),
     429: _error(
         "`SERVICE_BUSY`: wait queue full or no browser/host slot became free in time. "
         f"Or {AUTH_THROTTLED_DESCRIPTION}",
@@ -124,13 +161,33 @@ RENDER_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     ),
     500: _error("`INTERNAL_ERROR`: unexpected failure; the `traceId` is in the service log."),
     502: _error(
-        "`NAVIGATION_FAILED` (DNS, connection or TLS failure, or a redirect to a forbidden "
-        "address) or `TARGET_BLOCKED` (an anti-bot challenge did not resolve)."
+        "`NAVIGATION_FAILED` (DNS, connection or TLS failure, a redirect to a forbidden "
+        "address, or a page that could not be read), `TARGET_BLOCKED` (an anti-bot "
+        "challenge did not resolve) or "
+        "`RESPONSE_TOO_LARGE` (the rendered page exceeds `MAX_RESPONSE_BYTES` characters)."
     ),
     504: _error(
-        "`TIMEOUT`: `wait_for` never appeared (at `timeout`, or earlier with `idle_timeout`), "
-        "or the browser stopped responding."
+        "`TIMEOUT`: `wait_for` had not appeared when `timeout` was reached, the target did "
+        "not start responding in time, or the browser stopped responding."
     ),
+}
+
+
+# Swagger UI pre-fills the first example, so the minimal request comes first: callers
+# should start there and let the service decide everything else.
+RENDER_REQUEST_EXAMPLES: dict[str, dict[str, Any]] = {
+    "minimal": {
+        "summary": "Minimal: render a page as HTML",
+        "value": {"url": "https://example.com"},
+    },
+    "markdown_selector": {
+        "summary": "One element as Markdown",
+        "value": {"url": "https://example.com", "format": "markdown", "selector": "h1"},
+    },
+    "expert_wait_for": {
+        "summary": "Expert: wait for an element the page loads late",
+        "value": {"url": "https://example.com/product/42", "wait_for": "#price"},
+    },
 }
 
 

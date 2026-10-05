@@ -7,20 +7,24 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
-from urllib.parse import quote
+from typing import Annotated
+from urllib.parse import quote, urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, FastAPI, Request, Response
+from fastapi import APIRouter, Body, Depends, FastAPI, Request, Response
 
-import app.logging_config  # noqa: F401 -- configures logging on import
 from app.api_models import RenderRequest
 from app.auth import Authenticator, bearer_guard
 from app.auth_throttle import FailedAuthLimiter
+from app.body_limit import BodyLimitMiddleware
 from app.config import Settings, load_settings
 from app.content.output import OutputSpec, build_output
 from app.docs_routes import docs_router
 from app.errors import ServiceError, install_error_handling, trace_id_of
+from app.log_safety import loggable_url
+from app.logging_config import setup_logging
 from app.openapi_docs import (
     AUTH_RESPONSES,
+    RENDER_REQUEST_EXAMPLES,
     TRACE_REQUEST_PARAMETER,
     install_openapi,
     render_responses,
@@ -59,9 +63,7 @@ def _to_scrape_request(body: RenderRequest, timer: PhaseTimer) -> ScrapeRequest:
         selector=body.selector,
         timeout_seconds=float(body.timeout),
         use_proxy=body.use_proxy,
-        block_resources=body.block_resources,
-        idle_timeout_seconds=float(body.idle_timeout) if body.idle_timeout else None,
-        wait_for_settle_seconds=body.wait_for_settle,
+        block_resources=body.blocked_resources,
         timer=timer,
     )
 
@@ -79,7 +81,7 @@ class _RenderLog:
         log.info(
             "Render timing traceId=%s url=%s outcome=%s engine=%s %s",
             self.trace_id,
-            self.body.url,
+            loggable_url(self.body.url),
             self.outcome,
             self.engine,
             timer.summary(),
@@ -112,15 +114,35 @@ async def _respond(body: RenderRequest, result: ScrapeResult, timer: PhaseTimer)
     headers = {
         "X-Render-Engine": result.engine,
         "X-Render-Stable": str(result.stable).lower(),
-        "X-Final-Url": quote(result.final_url, safe=URL_SAFE_CHARACTERS),
+        "X-Render-Ready-Reason": result.ready_reason,
+        "X-Render-Profile": result.profile,
+        "X-Final-Url": quote(_without_userinfo(result.final_url), safe=URL_SAFE_CHARACTERS),
         "X-Upstream-Status": str(result.upstream_status),
     }
     return Response(content=output.content, media_type=output.media_type, headers=headers)
 
 
+def _without_userinfo(url: str) -> str:
+    # Credentials in a redirect target belong to the target, not in a response header.
+    parts = urlsplit(url)
+    host_and_port = parts.netloc.rpartition("@")[2]
+    return urlunsplit(parts._replace(netloc=host_and_port))
+
+
 def _clearance_stats(store: ClearanceStore | None) -> dict:
     # Only the count: cookie names, hosts and values stay out of every response.
     return {"enabled": store is not None, "entries": store.count() if store else 0}
+
+
+def _health_details(runtime: Runtime) -> dict:
+    return {
+        "status": "ok",
+        "version": SERVICE_VERSION,
+        "pool": vars(runtime.pool.stats()),
+        "verdicts": runtime.verdicts.counts(),
+        "clearance": _clearance_stats(runtime.clearance),
+        "profiles": {"entries": runtime.profiles.count()},
+    }
 
 
 def _health_router(authenticator: Authenticator) -> APIRouter:
@@ -132,19 +154,12 @@ def _health_router(authenticator: Authenticator) -> APIRouter:
 
     @router.get(
         "/health/detail",
-        summary="Pool utilisation, learned HTTP verdicts and stored clearance count",
+        summary="Pool utilisation, learned verdicts and profiles, stored clearance count",
         dependencies=[Depends(bearer_guard(authenticator))],
         responses=AUTH_RESPONSES,
     )
     def health_detail(request: Request) -> dict:
-        runtime = _runtime(request)
-        return {
-            "status": "ok",
-            "version": SERVICE_VERSION,
-            "pool": vars(runtime.pool.stats()),
-            "verdicts": runtime.verdicts.counts(),
-            "clearance": _clearance_stats(runtime.clearance),
-        }
+        return _health_details(_runtime(request))
 
     return router
 
@@ -159,7 +174,10 @@ def _render_router(authenticator: Authenticator) -> APIRouter:
         responses=render_responses(),
         openapi_extra=TRACE_REQUEST_PARAMETER,
     )
-    async def render(body: RenderRequest, request: Request) -> Response:
+    async def render(
+        body: Annotated[RenderRequest, Body(openapi_examples=RENDER_REQUEST_EXAMPLES)],
+        request: Request,
+    ) -> Response:
         return await _render(body, _runtime(request), trace_id_of(request))
 
     return router
@@ -201,6 +219,7 @@ def create_app(
     :raises ConfigError: if the environment configuration is invalid.
     """
     resolved = settings or load_settings()
+    setup_logging(resolved.log_level)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -210,6 +229,9 @@ def create_app(
         await application.state.runtime.close()
 
     application = _new_application(lifespan)
+    # Added first, so it runs innermost: its 413 still passes the trace-id and
+    # security-header middlewares.
+    application.add_middleware(BodyLimitMiddleware)
     install_error_handling(application)
     install_security_headers(application)
     install_openapi(application)

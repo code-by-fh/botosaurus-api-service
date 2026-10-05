@@ -31,6 +31,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/entrypoint
 COPY --chmod=0755 docker/chrome-launcher.sh /usr/local/bin/chrome-launcher
+# Managed Chrome policy: blocks file:// URLs, so nobody using the VNC live view can
+# open container files such as file:///proc/self/environ in the visible browser.
+COPY --chmod=0644 docker/chrome-policy.json /etc/opt/chrome/policies/managed/page-render-service.json
 
 ENV DISPLAY=:99 \
     CHROME_BIN=/usr/local/bin/chrome-launcher \

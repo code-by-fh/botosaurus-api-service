@@ -5,13 +5,21 @@ failing immediately; beyond ``queue.max_waiting`` waiting requests the pool
 answers ``SERVICE_BUSY`` at once so memory stays bounded on a small VPS.
 Workers that need a restart are recycled in the background and rejoin the
 pool afterwards.
+
+Late-content observation (``page_loader.LingeringRender``) keeps its worker:
+one Chrome renders one page at a time, and the observed tab still lives in it.
+Learning never delays real work, though. An observation only starts when no
+request is waiting for a worker, and a request that arrives while every worker
+is busy stops a running observation, which then disposes of its tab and frees
+its worker within one poll interval and a CDP round trip. A cut-short
+observation teaches nothing.
 """
 
 import asyncio
 import logging
 from dataclasses import dataclass
 
-from app.browser.page_loader import BrowserJob, BrowserPage
+from app.browser.page_loader import BrowserJob, BrowserPage, LingeringRender, RenderOutcome
 from app.browser.worker import BrowserWorker
 from app.config import QueueSettings
 from app.errors import ServiceBusyError
@@ -30,6 +38,7 @@ class PoolStats:
     idle: int
     busy: int
     recycling: int
+    observing: int
     waiting: int
     restarts: int
 
@@ -42,6 +51,7 @@ class BrowserPool:
         self._queue_settings = queue
         self._idle: asyncio.Queue[BrowserWorker] = asyncio.Queue()
         self._recycling: set[asyncio.Task[None]] = set()
+        self._observing: dict[asyncio.Task[None], LingeringRender] = {}
         self._waiting = 0
         self._restarts = 0
 
@@ -60,13 +70,55 @@ class BrowserPool:
         with job.timer.phase(Phase.QUEUE):
             worker = await self._acquire()
         try:
-            return await worker.render(job)
+            outcome = await worker.render(job)
+        except BaseException:
+            # Whatever ended the render, cancellation included, the slot must come back.
+            self._release(worker)
+            raise
+        return await self._hand_back(worker, outcome)
+
+    async def _hand_back(self, worker: BrowserWorker, outcome: RenderOutcome) -> BrowserPage:
+        lingering = outcome.lingering
+        if lingering is not None and self._waiting == 0:
+            self._start_observation(worker, lingering)
+            return outcome.page
+        try:
+            if lingering is not None:
+                log.debug("Late-content observation skipped, requests are waiting")
+                await lingering.discard()
+        finally:
+            self._release(worker)
+        return outcome.page
+
+    def _start_observation(self, worker: BrowserWorker, lingering: LingeringRender) -> None:
+        task = asyncio.create_task(self._observe(worker, lingering))
+        self._observing[task] = lingering
+        task.add_done_callback(lambda done: self._observing.pop(done, None))
+
+    async def _observe(self, worker: BrowserWorker, lingering: LingeringRender) -> None:
+        # Top level of a background task: nothing awaits it, so a failure in the
+        # learning hook has to be logged here or it would vanish.
+        try:
+            await lingering.observe()
+        except Exception:
+            log.error("Late-content observation crashed", exc_info=True)
         finally:
             self._release(worker)
 
+    def _preempt_observation(self) -> bool:
+        """Stop one running observation so its worker frees up; ``False`` if none runs."""
+        running = [lingering for lingering in self._observing.values() if not lingering.stopped]
+        if not running:
+            return False
+        running[0].stop()
+        log.info("Late-content observation cut short, a request needs its browser")
+        return True
+
     async def _acquire(self) -> BrowserWorker:
-        if self._idle.empty() and self._waiting >= self._queue_settings.max_waiting:
-            raise ServiceBusyError("All browsers are busy and the wait queue is full")
+        if self._idle.empty():
+            freeing = self._preempt_observation()
+            if not freeing and self._waiting >= self._queue_settings.max_waiting:
+                raise ServiceBusyError("All browsers are busy and the wait queue is full")
         self._waiting += 1
         try:
             async with asyncio.timeout(self._queue_settings.timeout_seconds):
@@ -105,17 +157,26 @@ class BrowserPool:
         """Return the current utilisation."""
         idle = self._idle.qsize()
         recycling = len(self._recycling)
+        observing = len(self._observing)
         return PoolStats(
             total=len(self._workers),
             idle=idle,
-            busy=len(self._workers) - idle - recycling,
+            busy=len(self._workers) - idle - recycling - observing,
             recycling=recycling,
+            observing=observing,
             waiting=self._waiting,
             restarts=self._restarts,
         )
 
+    async def drain(self) -> None:
+        """Wait for all running late-content observations (used in tests)."""
+        await asyncio.gather(*self._observing, return_exceptions=True)
+
     async def shutdown(self) -> None:
-        """Cancel pending restarts and stop every browser."""
+        """Cancel observations and pending restarts, then stop every browser."""
+        for task in list(self._observing):
+            task.cancel()
+        await asyncio.gather(*self._observing, return_exceptions=True)
         for task in list(self._recycling):
             task.cancel()
         await asyncio.gather(*self._recycling, return_exceptions=True)

@@ -54,7 +54,7 @@ class ClearanceHarness:
             selector=None,
             timeout_seconds=changes.pop("timeout_seconds", 5.0),
             use_proxy=changes.pop("use_proxy", False),
-            block_resources=False,
+            block_resources=frozenset(),
             timer=timer,
         )
         await self.runtime.scraper.scrape(request)

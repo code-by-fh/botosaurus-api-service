@@ -16,12 +16,12 @@ else
     exit 1
 fi
 
-# Auto-format python code in app and tests
-$RUFF format app tests
+# Auto-format python code in app, tests and scripts
+$RUFF format app tests scripts
 format_status=$?
 
 # Run ruff check
-$RUFF check app tests
+$RUFF check app tests scripts
 check_status=$?
 
 if [ $format_status -ne 0 ] || [ $check_status -ne 0 ]; then
@@ -30,4 +30,4 @@ if [ $format_status -ne 0 ] || [ $check_status -ne 0 ]; then
 fi
 
 # Re-stage formatted files if formatting was applied
-git add app/ tests/
+git add app/ tests/ scripts/

@@ -8,7 +8,8 @@ Two schemes are offered:
 - **HTTP Basic** (username ignored, password = API key) for the browser pages
   (``/vnc``, ``/docs``), so that browsers show their native login dialog.
 
-Clients that present wrong keys too often are locked out (``429``) for a while.
+Clients that present wrong keys too often get ``429`` instead of ``401`` for
+their wrong keys for a while; a valid key always passes.
 """
 
 import base64
@@ -82,19 +83,22 @@ class Authenticator:
     def accepts(self, connection: HTTPConnection, candidate: str | None) -> bool:
         """Return whether ``candidate`` is a configured key; count it if it is wrong.
 
-        Missing credentials are not counted: they cannot guess a key, and browsers
-        send one unauthenticated request before showing the login dialog.
+        A valid key always passes, even from a locked-out address: behind a reverse
+        proxy many clients can share one address, and a lockout that also refused
+        valid keys would let anyone lock every client out. Missing credentials are
+        not counted: they cannot guess a key, and browsers send one unauthenticated
+        request before showing the login dialog.
 
-        :raises TooManyAuthFailuresError: while the client is locked out, even for a valid key.
+        :raises TooManyAuthFailuresError: for a wrong key while the client is locked out.
         """
-        client = client_address(connection, self._trusted)
-        retry_after = self._limiter.retry_after_seconds(client)
-        if retry_after:
-            raise TooManyAuthFailuresError(retry_after)
         if candidate is None:
             return False
         if _matches_any(candidate, self._keys):
             return True
+        client = client_address(connection, self._trusted)
+        retry_after = self._limiter.retry_after_seconds(client)
+        if retry_after:
+            raise TooManyAuthFailuresError(retry_after)
         log.warning("Rejected invalid API key from %s", client)
         self._limiter.record_failure(client)
         return False
@@ -104,7 +108,7 @@ def bearer_guard(authenticator: Authenticator) -> Guard:
     """Build a FastAPI dependency that requires one of the keys as Bearer token.
 
     :raises AuthenticationError: 401 when the header is missing or the key is unknown.
-    :raises TooManyAuthFailuresError: 429 while the client is locked out.
+    :raises TooManyAuthFailuresError: 429 for a wrong key while the client is locked out.
     """
 
     async def verify(
@@ -122,7 +126,7 @@ def basic_guard(authenticator: Authenticator) -> Guard:
     """Build a FastAPI dependency that requires one of the keys as Basic-auth password.
 
     :raises AuthenticationError: 401 with a ``WWW-Authenticate`` challenge on failure.
-    :raises TooManyAuthFailuresError: 429 while the client is locked out.
+    :raises TooManyAuthFailuresError: 429 for a wrong key while the client is locked out.
     """
 
     async def verify(request: Request) -> None:

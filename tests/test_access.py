@@ -93,13 +93,32 @@ def test_repeated_wrong_keys_lock_the_client_out():
     assert int(response.headers["retry-after"]) > 0
 
 
-def test_locked_out_client_is_refused_even_with_a_valid_key():
+def test_locked_out_client_still_passes_with_a_valid_key():
     with build_client() as client:
         for _ in range(MAX_AUTH_FAILURES):
             client.get(HEALTH_DETAIL, headers=WRONG_BEARER)
         response = client.get(HEALTH_DETAIL, headers=VALID_BEARER)
 
+    assert response.status_code == 200
+
+
+def test_valid_keys_do_not_lift_the_lockout_for_wrong_keys():
+    with build_client() as client:
+        for _ in range(MAX_AUTH_FAILURES):
+            client.get(HEALTH_DETAIL, headers=WRONG_BEARER)
+        client.get(HEALTH_DETAIL, headers=VALID_BEARER)
+        response = client.get(HEALTH_DETAIL, headers=WRONG_BEARER)
+
     assert response.status_code == 429
+
+
+def test_locked_out_client_without_credentials_gets_the_login_challenge():
+    with build_client() as client:
+        for _ in range(MAX_AUTH_FAILURES):
+            client.get(HEALTH_DETAIL, headers=WRONG_BEARER)
+        response = client.get(HEALTH_DETAIL)
+
+    assert response.status_code == 401
 
 
 def test_failures_below_the_limit_do_not_lock_out():
@@ -121,19 +140,22 @@ def test_missing_credentials_do_not_count_as_failures():
 
 
 def test_wrong_basic_passwords_count_towards_the_lockout():
+    wrong_basic = ("any-user", "wrong-key")
     with build_client(ENABLE_DOCS="true") as client:
         for _ in range(MAX_AUTH_FAILURES):
-            client.get("/docs", auth=("any-user", "wrong-key"))
-        response = client.get("/docs", auth=BASIC_AUTH)
+            client.get("/docs", auth=wrong_basic)
+        locked = client.get("/docs", auth=wrong_basic)
+        valid = client.get("/docs", auth=BASIC_AUTH)
 
-    assert response.status_code == 429
+    assert locked.status_code == 429
+    assert valid.status_code == 200
 
 
 def test_forwarded_for_is_ignored_from_untrusted_peers():
     with build_client() as client:
         for index in range(MAX_AUTH_FAILURES):
             client.get(HEALTH_DETAIL, headers=forwarded_for(f"198.51.100.{index}", WRONG_BEARER))
-        response = client.get(HEALTH_DETAIL, headers=forwarded_for(SECOND_CLIENT, VALID_BEARER))
+        response = client.get(HEALTH_DETAIL, headers=forwarded_for(SECOND_CLIENT, WRONG_BEARER))
 
     assert response.status_code == 429
 
@@ -142,11 +164,11 @@ def test_behind_a_trusted_proxy_the_lockout_is_per_forwarded_client():
     with build_client(peer=PROXY_ADDRESS, TRUSTED_PROXY_IPS=PROXY_ADDRESS) as client:
         for _ in range(MAX_AUTH_FAILURES):
             client.get(HEALTH_DETAIL, headers=forwarded_for(FIRST_CLIENT, WRONG_BEARER))
-        locked = client.get(HEALTH_DETAIL, headers=forwarded_for(FIRST_CLIENT, VALID_BEARER))
-        other = client.get(HEALTH_DETAIL, headers=forwarded_for(SECOND_CLIENT, VALID_BEARER))
+        locked = client.get(HEALTH_DETAIL, headers=forwarded_for(FIRST_CLIENT, WRONG_BEARER))
+        other = client.get(HEALTH_DETAIL, headers=forwarded_for(SECOND_CLIENT, WRONG_BEARER))
 
     assert locked.status_code == 429
-    assert other.status_code == 200
+    assert other.status_code == 401
 
 
 @pytest.mark.parametrize(
